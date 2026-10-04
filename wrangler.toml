@@ -1,0 +1,17 @@
+name = "ebay-chat-agent"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+account_id = "8623b33254a8cb7d008248402e8e3f50"
+
+[vars]
+EBAY_ENV = "production"
+EBAY_API_BASE = "https://api.ebay.com"
+EBAY_EPS_URL = "https://api.ebay.com/ws/api.dll"
+EBAY_MARKETPLACE_ID = "EBAY_US"
+
+# KV Namespace for persisting draft listings and session state
+# Replace 'id' with your actual KV namespace ID once created via `npx wrangler kv:namespace create DRAFTS_KV`
+[[kv_namespaces]]
+binding = "DRAFTS_KV"
+id = "6751b2bf94c840f3bc39ce3cc692ce96"
