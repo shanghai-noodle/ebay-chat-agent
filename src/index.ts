@@ -414,7 +414,7 @@ app.post('/', async (c) => {
             return !mime || mime.startsWith('image/') || mime === 'application/octet-stream';
           });
 
-          const candidateAttachments = (imageAttachments.length > 0 ? imageAttachments : attachments).slice(0, 12);
+          const candidateAttachments = (imageAttachments.length > 0 ? imageAttachments : attachments).slice(0, 16);
           console.log(`[Attachments] Processing ${attachments.length} attachments (candidate images: ${candidateAttachments.length})`);
 
           // Download all attachments in parallel
@@ -505,7 +505,7 @@ app.post('/', async (c) => {
                 throw new Error('Failed to upload new photo(s) to eBay Picture Services.');
               }
 
-              const combinedUrls = Array.from(new Set([...existingDraft.imageUrls, ...addedUrls])).slice(0, 12);
+              const combinedUrls = Array.from(new Set([...existingDraft.imageUrls, ...addedUrls])).slice(0, 16);
               existingDraft.imageUrls = combinedUrls;
               existingDraft.updatedAt = Date.now();
               await draftStore.saveDraft(existingDraft);
@@ -515,7 +515,7 @@ app.post('/', async (c) => {
                 spaceId,
                 {
                   ...(threadKey ? { thread: { name: threadKey } } : {}),
-                  text: `📸 Added ${addedUrls.length} new photo(s)! Total gallery photos: ${combinedUrls.length}/12 ready for eBay.`,
+                  text: `📸 Added ${addedUrls.length} new photo(s)! Total gallery photos: ${combinedUrls.length}/16 ready for eBay.`,
                   cardsV2: [previewCard],
                 },
                 c.env.GOOGLE_SERVICE_ACCOUNT_JSON
@@ -589,7 +589,7 @@ app.post('/', async (c) => {
               quantity: 1,
               shippingCost: initialShipping,
               marketIntelligence: analysis.marketIntelligence,
-              imageUrls: newEpsUrls.slice(0, 12),
+              imageUrls: newEpsUrls.slice(0, 16),
               createdAt: Date.now(),
               updatedAt: Date.now(),
             };

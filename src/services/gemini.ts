@@ -180,8 +180,8 @@ export class GeminiService {
    - Realistic pricing in USD.
    - Default shippingCost is 0 (Free shipping) unless user requested otherwise.${hintText}`;
 
-    // Pass up to 5 images to Gemini to provide rich context without exceeding payload limits
-    const selectedImages = images.slice(0, 5);
+    // Pass up to 8 images to Gemini to provide rich context without exceeding payload limits
+    const selectedImages = images.slice(0, 8);
     const imageInputs = selectedImages.map((img) => ({
       type: 'image',
       data: img.base64,
