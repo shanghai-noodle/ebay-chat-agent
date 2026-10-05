@@ -68,7 +68,7 @@ export class ImageProcessor {
   }
 
   /**
-   * Rotates pixel matrix according to EXIF orientation.
+   * Rotates pixel matrix according to EXIF orientation so image displays upright.
    */
   static rotatePixels(
     srcData: Uint8Array,
@@ -138,129 +138,10 @@ export class ImageProcessor {
   }
 
   /**
-   * Enhances lighting, vibrancy, and contrast for crisp commercial product presentation.
-   */
-  static enhanceLightingAndContrast(data: Uint8Array): void {
-    const contrastFactor = 1.08;
-    const brightnessBoost = 6;
-
-    for (let i = 0; i < data.length; i += 4) {
-      for (let c = 0; c < 3; c++) {
-        const val = data[i + c];
-        // Apply contrast stretch around midpoint 128 + slight brightness boost
-        const enhanced = Math.min(
-          255,
-          Math.max(0, Math.round((val - 128) * contrastFactor + 128 + brightnessBoost))
-        );
-        data[i + c] = enhanced;
-      }
-    }
-  }
-
-  /**
-   * Edge-aware flood fill background replacement to clean, solid white (#FFFFFF).
-   * Seeds from all borders/corners, determines background colors, and replaces
-   * connected background pixels with solid pure white while preserving the product subject.
-   */
-  static replaceBackgroundWithWhite(data: Uint8Array, width: number, height: number): void {
-    const totalPixels = width * height;
-    const visited = new Uint8Array(totalPixels);
-    const queue: number[] = [];
-
-    // 1. Sample border pixels to establish background reference color
-    let sumR = 0,
-      sumG = 0,
-      sumB = 0,
-      borderCount = 0;
-
-    const samplePixel = (x: number, y: number) => {
-      const idx = (y * width + x) * 4;
-      sumR += data[idx];
-      sumG += data[idx + 1];
-      sumB += data[idx + 2];
-      borderCount++;
-    };
-
-    // Step every 4 pixels along the border for speed and coverage
-    for (let x = 0; x < width; x += 4) {
-      samplePixel(x, 0);
-      samplePixel(x, height - 1);
-    }
-    for (let y = 0; y < height; y += 4) {
-      samplePixel(0, y);
-      samplePixel(width - 1, y);
-    }
-
-    if (borderCount === 0) return;
-    const bgAvgR = sumR / borderCount;
-    const bgAvgG = sumG / borderCount;
-    const bgAvgB = sumB / borderCount;
-
-    // 2. Initialize flood-fill queue with all outer boundary pixels
-    for (let x = 0; x < width; x++) {
-      queue.push(x, 0);
-      queue.push(x, height - 1);
-      visited[x] = 1;
-      visited[(height - 1) * width + x] = 1;
-    }
-    for (let y = 0; y < height; y++) {
-      queue.push(0, y);
-      queue.push(width - 1, y);
-      visited[y * width] = 1;
-      visited[y * width + width - 1] = 1;
-    }
-
-    // Color tolerance distance from sampled background
-    const tolerance = 48;
-    const maxSteps = totalPixels * 2;
-    let steps = 0;
-    let head = 0;
-
-    while (head < queue.length && steps++ < maxSteps) {
-      const x = queue[head++];
-      const y = queue[head++];
-      const idx = (y * width + x) * 4;
-
-      // Replace pixel with solid white
-      data[idx] = 255;
-      data[idx + 1] = 255;
-      data[idx + 2] = 255;
-
-      // Check 4-connected neighbors
-      const neighbors = [
-        [x + 1, y],
-        [x - 1, y],
-        [x, y + 1],
-        [x, y - 1],
-      ];
-
-      for (const [nx, ny] of neighbors) {
-        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-          const nPos = ny * width + nx;
-          if (!visited[nPos]) {
-            visited[nPos] = 1;
-            const nIdx = nPos * 4;
-            const dr = data[nIdx] - bgAvgR;
-            const dg = data[nIdx + 1] - bgAvgG;
-            const db = data[nIdx + 2] - bgAvgB;
-            const dist = Math.sqrt(dr * dr + dg * dg + db * db);
-
-            if (dist < tolerance) {
-              queue.push(nx, ny);
-            }
-          }
-        }
-      }
-    }
-  }
-
-  /**
-   * Full pipeline:
-   * 1. Decodes JPEG.
-   * 2. Detects and corrects EXIF orientation (upright).
-   * 3. Enhances lighting & contrast.
-   * 4. Replaces background with solid white (#FFFFFF).
-   * 5. Re-encodes to high-quality JPEG ready for eBay Picture Services (EPS).
+   * Photo processing:
+   * 1. Detects EXIF orientation.
+   * 2. If orientation is 1 (normal/upright), returns the original photo untouched (zero loss / original background).
+   * 3. If orientation is rotated (3, 6, 8), rotates pixels to upright orientation.
    */
   static processPhoto(base64Input: string): { base64: string; mimeType: string } {
     try {
@@ -274,40 +155,33 @@ export class ImageProcessor {
       // 1. Detect orientation
       const orientation = this.getExifOrientation(bytes);
 
+      // If already upright (orientation <= 1), keep original image untouched
+      if (orientation <= 1) {
+        return { base64: base64Input, mimeType: 'image/jpeg' };
+      }
+
+      console.log(`[ImageProcessor] Correcting EXIF orientation ${orientation} to upright...`);
+
       // 2. Decode JPEG
       const decoded = jpeg.decode(bytes, { useTArray: true, maxMemoryUsageInMB: 256 });
       if (!decoded || !decoded.data) {
         return { base64: base64Input, mimeType: 'image/jpeg' };
       }
 
-      // 3. Rotate if needed
-      let working = {
-        data: decoded.data,
-        width: decoded.width,
-        height: decoded.height,
-      };
+      // 3. Rotate to upright
+      const rotated = this.rotatePixels(decoded.data, decoded.width, decoded.height, orientation);
 
-      if (orientation > 1) {
-        working = this.rotatePixels(decoded.data, decoded.width, decoded.height, orientation);
-      }
-
-      // 4. Enhance lighting & contrast
-      this.enhanceLightingAndContrast(working.data);
-
-      // 5. Replace background with solid white
-      this.replaceBackgroundWithWhite(working.data, working.width, working.height);
-
-      // 6. Re-encode to high quality JPEG
+      // 4. Re-encode to high quality JPEG
       const reencoded = jpeg.encode(
         {
-          data: working.data,
-          width: working.width,
-          height: working.height,
+          data: rotated.data,
+          width: rotated.width,
+          height: rotated.height,
         },
-        92
+        95
       );
 
-      // 7. Convert back to base64
+      // 5. Convert back to base64
       let outBinary = '';
       const outBytes = reencoded.data;
       const chunkSize = 8192;

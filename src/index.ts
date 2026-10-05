@@ -466,8 +466,8 @@ app.post('/', async (c) => {
             return;
           }
 
-          // Automatically correct EXIF orientation (upright), enhance lighting & contrast, and replace background with solid white (#FFFFFF)
-          console.log(`[ImageProcessor] Processing ${rawImages.length} photo(s) (orientation fix, lighting enhancement, white background)...`);
+          // Automatically correct EXIF orientation (upright) while preserving 100% original photo quality & background
+          console.log(`[ImageProcessor] Processing ${rawImages.length} photo(s) (orientation check & correction)...`);
           const validImages = rawImages.map((img) => {
             const processed = ImageProcessor.processPhoto(img.base64);
             return {
