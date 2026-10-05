@@ -91,6 +91,32 @@ export class GoogleChatCards {
       ],
     });
 
+    // Market Intelligence section
+    if (draft.marketIntelligence) {
+      const mi = draft.marketIntelligence;
+      sections.push({
+        header: '📊 Market Intelligence & Competitor Pricing',
+        widgets: [
+          {
+            decoratedText: {
+              topLabel: 'What Others Are Selling For',
+              text: `🏷️ <b>Active Comps:</b> ${mi.activeCompRange || 'N/A'}<br>✅ <b>Recent Sold Comps:</b> ${mi.recentSoldRange || 'N/A'}`,
+              wrapText: true,
+            },
+          },
+          ...(mi.competitorSummary
+            ? [
+                {
+                  textParagraph: {
+                    text: `💡 <i>${mi.competitorSummary}</i>`,
+                  },
+                },
+              ]
+            : []),
+        ],
+      });
+    }
+
     const publishUrl = `https://ebay-chat-agent.tommyguc.workers.dev/publish?draftId=${encodeURIComponent(draft.id)}&spaceId=${encodeURIComponent(draft.spaceId)}&threadKey=${encodeURIComponent(draft.threadKey)}`;
     const isFreeShipping = !draft.shippingCost || draft.shippingCost <= 0;
     const priceDisplay = isFreeShipping
@@ -116,7 +142,7 @@ export class GoogleChatCards {
         },
         {
           textParagraph: {
-            text: '💡 <i>Tip: Tap the button above, or simply reply <b>"publish it"</b> to publish to eBay! (e.g. "change price to $20", "set shipping to $5")</i>',
+            text: '💡 <i>Tip: Tap the button, reply <b>"publish it"</b> to post live, or chat with me anytime (e.g. "How much are others selling for?", "change price to $40", "free shipping")!</i>',
           },
         },
       ],

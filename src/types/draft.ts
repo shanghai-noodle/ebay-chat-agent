@@ -29,6 +29,9 @@ export interface ListingDraft {
   // Images
   imageUrls: string[]; // EPS URLs (https://i.ebayimg.com/...)
   
+  // Market Intelligence & Competitor Pricing
+  marketIntelligence?: MarketIntelligence;
+
   // Publication results
   sku?: string;
   offerId?: string;
@@ -38,4 +41,10 @@ export interface ListingDraft {
   
   createdAt: number;
   updatedAt: number;
+}
+
+export interface MarketIntelligence {
+  activeCompRange?: string; // e.g. "$45.00 - $65.00"
+  recentSoldRange?: string; // e.g. "$40.00 - $55.00"
+  competitorSummary?: string; // e.g. "Most similar brand new listings range from $48 to $62. Recent sold listings averaged ~$52 with free shipping."
 }

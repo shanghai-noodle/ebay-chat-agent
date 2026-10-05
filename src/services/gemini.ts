@@ -12,6 +12,11 @@ export interface ExtractedItemAnalysis {
     recommended: number;
     high: number;
   };
+  marketIntelligence?: {
+    activeCompRange?: string;
+    recentSoldRange?: string;
+    competitorSummary?: string;
+  };
   shippingCost?: number;
 }
 
@@ -56,12 +61,30 @@ const EXTRACTION_SCHEMA = {
       },
       required: ['low', 'recommended', 'high'],
     },
+    marketIntelligence: {
+      type: 'object',
+      properties: {
+        activeCompRange: {
+          type: 'string',
+          description: 'Estimated price range that other sellers are currently listing this item for on eBay (e.g. "$45 - $65").',
+        },
+        recentSoldRange: {
+          type: 'string',
+          description: 'Estimated price range for recent confirmed sold items in comparable condition (e.g. "$38 - $52").',
+        },
+        competitorSummary: {
+          type: 'string',
+          description: 'Summary of what other people are selling the item for, competitor pricing, and market demand tips.',
+        },
+      },
+      required: ['activeCompRange', 'recentSoldRange', 'competitorSummary'],
+    },
     shippingCost: {
       type: 'number',
       description: 'Shipping cost in USD. Default is 0 (Free shipping), unless the user explicitly requested a specific shipping fee.',
     },
   },
-  required: ['title', 'categoryKeywords', 'condition', 'conditionDescription', 'aspects', 'descriptionHtml', 'suggestedPrice'],
+  required: ['title', 'categoryKeywords', 'condition', 'conditionDescription', 'aspects', 'descriptionHtml', 'suggestedPrice', 'marketIntelligence'],
 };
 
 export class GeminiService {
@@ -237,5 +260,99 @@ Update the draft fields based on the user's instruction. If the user mentions a 
     });
 
     return JSON.parse(outputText);
+  }
+
+  /**
+   * Multi-turn conversational relay to Gemini.
+   * Handles user questions (market pricing, item rarity, advice) and detects draft edits.
+   */
+  async chatWithSeller(
+    userMessage: string,
+    currentDraft?: ListingDraft | null
+  ): Promise<{
+    replyText: string;
+    hasDraftUpdates: boolean;
+    draftUpdates?: Partial<ListingDraft>;
+  }> {
+    const draftContext = currentDraft
+      ? `Active Listing Draft:
+- Title: "${currentDraft.title}"
+- Condition: ${currentDraft.condition} (${currentDraft.conditionDescription || 'No flaws'})
+- Price: $${currentDraft.price.toFixed(2)} USD
+- Shipping: ${(!currentDraft.shippingCost || currentDraft.shippingCost <= 0) ? 'Free Shipping' : '$' + currentDraft.shippingCost.toFixed(2)}
+- Category: ${currentDraft.categoryName || 'General'} (ID: ${currentDraft.categoryId || 'N/A'})
+- Aspects: ${JSON.stringify(currentDraft.aspects || {})}
+${currentDraft.marketIntelligence ? `- Market Comps: Active ${currentDraft.marketIntelligence.activeCompRange || 'N/A'}, Sold ${currentDraft.marketIntelligence.recentSoldRange || 'N/A'} - ${currentDraft.marketIntelligence.competitorSummary || ''}` : ''}`
+      : 'No active listing draft in this thread yet.';
+
+    const systemPrompt = `You are an expert eBay Selling Assistant and ecommerce advisor.
+You are conversing with the seller "ly014132", an authentic California seller specializing in collectibles, figures, and merchandise.
+
+${draftContext}
+
+User Message: "${userMessage}"
+
+Instructions:
+1. Answer the user's question or message directly, conversationally, concisely, and accurately.
+   - If they ask about competitor prices or market comps, give realistic market data and eBay trends.
+   - If they ask general eBay, shipping, packaging, or listing advice, answer helpfully.
+   - Keep responses easy to read in Google Chat (1-3 friendly paragraphs with bullet points if helpful).
+2. If the user's message asks to update/modify the draft (e.g. price change, shipping cost, title change, condition change, or description update):
+   - Set "hasDraftUpdates": true
+   - In "draftUpdates", provide only the updated fields (e.g. { "price": 45, "shippingCost": 0 }).
+   - Otherwise, set "hasDraftUpdates": false.`;
+
+    try {
+      const outputText = await this.callInteractionsApi({
+        input: [{ type: 'text', text: systemPrompt }],
+        response_format: {
+          type: 'text',
+          mime_type: 'application/json',
+          schema: {
+            type: 'object',
+            properties: {
+              replyText: {
+                type: 'string',
+                description: 'The conversational response to display to the user in Google Chat.',
+              },
+              hasDraftUpdates: {
+                type: 'boolean',
+                description: 'True if the user requested changes to the listing draft.',
+              },
+              draftUpdates: {
+                type: 'object',
+                properties: {
+                  title: { type: 'string' },
+                  price: { type: 'number' },
+                  shippingCost: { type: 'number' },
+                  condition: {
+                    type: 'string',
+                    enum: ['NEW', 'LIKE_NEW', 'USED_EXCELLENT', 'USED_GOOD', 'FOR_PARTS_OR_NOT_WORKING'],
+                  },
+                  conditionDescription: { type: 'string' },
+                  descriptionHtml: { type: 'string' },
+                  aspects: {
+                    type: 'object',
+                    additionalProperties: {
+                      type: 'array',
+                      items: { type: 'string' },
+                    },
+                  },
+                },
+              },
+            },
+            required: ['replyText', 'hasDraftUpdates'],
+          },
+        },
+      });
+
+      return JSON.parse(outputText);
+    } catch (err: any) {
+      console.warn('[Gemini] chatWithSeller error, falling back to basic reply:', err);
+      return {
+        replyText: `I received your message: "${userMessage}". Let me know if you would like to adjust the price, title, or publish!`,
+        hasDraftUpdates: false,
+      };
+    }
   }
 }

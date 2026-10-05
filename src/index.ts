@@ -9,6 +9,7 @@ import { EbayTradingService } from './services/ebay/trading';
 import { GoogleChatCards } from './services/google-chat/cards';
 import { GoogleChatMediaService } from './services/google-chat/media';
 import { AVATAR_BASE64 } from './assets/avatar-data';
+import { ImageProcessor } from './services/image-processor';
 
 const app = new Hono<{ Bindings: CloudflareBindings }>();
 
@@ -438,9 +439,9 @@ app.post('/', async (c) => {
             })
           );
 
-          const validImages = downloadResults.filter((img): img is NonNullable<typeof img> => img !== null);
+          const rawImages = downloadResults.filter((img): img is NonNullable<typeof img> => img !== null);
 
-          if (validImages.length === 0) {
+          if (rawImages.length === 0) {
             const hasDrive = attachments.some((a: any) => a.driveDataRef?.driveFileId);
             if (hasDrive) {
               await GoogleChatMediaService.postMessage(
@@ -464,6 +465,16 @@ app.post('/', async (c) => {
             );
             return;
           }
+
+          // Automatically correct EXIF orientation (upright), enhance lighting & contrast, and replace background with solid white (#FFFFFF)
+          console.log(`[ImageProcessor] Processing ${rawImages.length} photo(s) (orientation fix, lighting enhancement, white background)...`);
+          const validImages = rawImages.map((img) => {
+            const processed = ImageProcessor.processPhoto(img.base64);
+            return {
+              base64: processed.base64,
+              mimeType: processed.mimeType,
+            };
+          });
 
           try {
             const eps = new EbayEPSService({
@@ -577,6 +588,7 @@ app.post('/', async (c) => {
               currency: 'USD',
               quantity: 1,
               shippingCost: initialShipping,
+              marketIntelligence: analysis.marketIntelligence,
               imageUrls: newEpsUrls.slice(0, 12),
               createdAt: Date.now(),
               updatedAt: Date.now(),
@@ -625,19 +637,28 @@ app.post('/', async (c) => {
         const existingDraft = await draftStore.getDraft(spaceId, threadKey);
 
         if (!existingDraft) {
-          const isGreeting = /\b(hi|hello|hey|help|start)\b/i.test(messageText);
-          const replyText = isGreeting
-            ? '👋 Hi! I am your eBay Listing Assistant. Send me a photo of any item you want to sell, and I will draft a listing, estimate pricing, and publish it to eBay for you!'
-            : '📸 Please upload a photo of the item you want to sell first, and I will generate your listing draft!';
-
-          await GoogleChatMediaService.postMessage(
-            spaceId,
-            {
-              ...(threadKey ? { thread: { name: threadKey } } : {}),
-              text: replyText,
-            },
-            c.env.GOOGLE_SERVICE_ACCOUNT_JSON
-          );
+          try {
+            const gemini = new GeminiService(c.env.GEMINI_API_KEY);
+            const chatResult = await gemini.chatWithSeller(messageText, null);
+            await GoogleChatMediaService.postMessage(
+              spaceId,
+              {
+                ...(threadKey ? { thread: { name: threadKey } } : {}),
+                text: chatResult.replyText || '👋 Hi! Upload a photo of any item you want to sell, and I will draft a listing, estimate pricing, and publish it to eBay for you!',
+              },
+              c.env.GOOGLE_SERVICE_ACCOUNT_JSON
+            );
+          } catch (err: any) {
+            console.error('[Chat] General Q&A error:', err);
+            await GoogleChatMediaService.postMessage(
+              spaceId,
+              {
+                ...(threadKey ? { thread: { name: threadKey } } : {}),
+                text: '📸 Please upload a photo of the item you want to sell first, and I will generate your listing draft!',
+              },
+              c.env.GOOGLE_SERVICE_ACCOUNT_JSON
+            );
+          }
           return;
         }
 
@@ -729,51 +750,64 @@ app.post('/', async (c) => {
           }
         }
 
-        // Conversational adjustments via Gemini
+        // Multi-turn conversational relay to Gemini for Q&A and intelligent draft refinements
         try {
           const gemini = new GeminiService(c.env.GEMINI_API_KEY);
-          const updates = await gemini.refineListing(existingDraft, messageText);
+          const chatResult = await gemini.chatWithSeller(messageText, existingDraft);
 
-          if (updates.title) {
-            let cleanTitle = updates.title.replace(/[\r\n]+/g, ' ').trim();
-            if (
-              cleanTitle.includes('"price":') ||
-              cleanTitle.includes('"aspects":') ||
-              cleanTitle.includes('{') ||
-              cleanTitle.includes('}')
-            ) {
-              cleanTitle = cleanTitle.split(/["”]\s*,\s*"/)[0].replace(/["”{}]/g, '').trim();
+          if (chatResult.hasDraftUpdates && chatResult.draftUpdates) {
+            const updates = chatResult.draftUpdates;
+            if (updates.title) {
+              let cleanTitle = updates.title.replace(/[\r\n]+/g, ' ').trim();
+              if (
+                cleanTitle.includes('"price":') ||
+                cleanTitle.includes('"aspects":') ||
+                cleanTitle.includes('{') ||
+                cleanTitle.includes('}')
+              ) {
+                cleanTitle = cleanTitle.split(/["”]\s*,\s*"/)[0].replace(/["”{}]/g, '').trim();
+              }
+              if (cleanTitle.length > 0) {
+                existingDraft.title = cleanTitle.slice(0, 80);
+              }
             }
-            if (cleanTitle.length > 0) {
-              existingDraft.title = cleanTitle.slice(0, 80);
-            }
-          }
 
-          if (typeof updates.price === 'number' && !isNaN(updates.price) && updates.price > 0) {
-            existingDraft.price = updates.price;
-          }
-          if (typeof (updates as any).shippingCost === 'number' && !isNaN((updates as any).shippingCost) && (updates as any).shippingCost >= 0) {
-            existingDraft.shippingCost = (updates as any).shippingCost;
-          }
-          if (updates.condition) existingDraft.condition = updates.condition;
-          if (updates.conditionDescription)
-            existingDraft.conditionDescription = updates.conditionDescription;
-          if (updates.descriptionHtml)
-            existingDraft.descriptionHtml = updates.descriptionHtml;
-          if (updates.aspects && typeof updates.aspects === 'object') {
-            for (const [k, v] of Object.entries(updates.aspects)) {
-              if (Array.isArray(v)) {
-                existingDraft.aspects[k] = v;
-              } else if (typeof v === 'string') {
-                existingDraft.aspects[k] = [v];
+            if (typeof updates.price === 'number' && !isNaN(updates.price) && updates.price > 0) {
+              existingDraft.price = updates.price;
+            }
+            if (typeof updates.shippingCost === 'number' && !isNaN(updates.shippingCost) && updates.shippingCost >= 0) {
+              existingDraft.shippingCost = updates.shippingCost;
+            }
+            if (updates.condition) existingDraft.condition = updates.condition;
+            if (updates.conditionDescription)
+              existingDraft.conditionDescription = updates.conditionDescription;
+            if (updates.descriptionHtml)
+              existingDraft.descriptionHtml = updates.descriptionHtml;
+            if (updates.aspects && typeof updates.aspects === 'object') {
+              for (const [k, v] of Object.entries(updates.aspects)) {
+                if (Array.isArray(v)) {
+                  existingDraft.aspects[k] = v;
+                } else if (typeof v === 'string') {
+                  existingDraft.aspects[k] = [v];
+                }
               }
             }
           }
-        } catch (geminiErr: any) {
-          console.warn('[Refine] Gemini refinement warning:', geminiErr);
-        }
 
-        try {
+          // 1. Post Gemini's conversational reply message to answer the user's question
+          if (chatResult.replyText) {
+            await GoogleChatMediaService.postMessage(
+              spaceId,
+              {
+                ...(threadKey ? { thread: { name: threadKey } } : {}),
+                text: chatResult.replyText,
+              },
+              c.env.GOOGLE_SERVICE_ACCOUNT_JSON
+            );
+          }
+
+          // 2. Save draft and update Card v2 preview
+          existingDraft.updatedAt = Date.now();
           await draftStore.saveDraft(existingDraft);
 
           const previewCard = GoogleChatCards.buildListingPreviewCard(existingDraft).cardsV2[0];
@@ -802,20 +836,8 @@ app.post('/', async (c) => {
               await draftStore.saveDraft(existingDraft);
             }
           }
-        } catch (err: any) {
-          console.error('[Refine] Update error:', err);
-          const errCard = GoogleChatCards.buildErrorCard(
-            `Failed to update draft: ${err.message || err}`
-          ).cardsV2[0];
-
-          await GoogleChatMediaService.postMessage(
-            spaceId,
-            {
-              ...(threadKey ? { thread: { name: threadKey } } : {}),
-              cardsV2: [errCard],
-            },
-            c.env.GOOGLE_SERVICE_ACCOUNT_JSON
-          );
+        } catch (geminiErr: any) {
+          console.error('[Chat] Conversational error:', geminiErr);
         }
       })()
     );
