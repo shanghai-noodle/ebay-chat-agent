@@ -34,6 +34,43 @@ app.get('/avatar.png', (c) => {
   });
 });
 
+// Internal Service-Binding Bridge for Bluestone Lab Storefront eBay Sync
+app.post('/internal/ebay-xml', async (c) => {
+  const { callName, xmlBody } = await c.req.json<{ callName: string; xmlBody: string }>();
+  const userToken = c.env.EBAY_USER_TOKEN || '';
+  const isOAuth = userToken.startsWith('v^1.');
+  const credsXml = isOAuth
+    ? ''
+    : `<RequesterCredentials><eBayAuthToken>${userToken}</eBayAuthToken></RequesterCredentials>`;
+
+  const finalXml = xmlBody
+    .replace(/<RequesterCredentials>[\s\S]*?<\/RequesterCredentials>/i, credsXml)
+    .replace('<!--EBAY_CREDENTIALS-->', credsXml);
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'text/xml; charset=utf-8',
+    'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
+    'X-EBAY-API-CALL-NAME': callName,
+    'X-EBAY-API-SITEID': '0',
+  };
+  if (c.env.EBAY_APP_ID) headers['X-EBAY-API-APP-NAME'] = c.env.EBAY_APP_ID;
+  if (c.env.EBAY_DEV_ID) headers['X-EBAY-API-DEV-NAME'] = c.env.EBAY_DEV_ID;
+  if (c.env.EBAY_CERT_ID) headers['X-EBAY-API-CERT-NAME'] = c.env.EBAY_CERT_ID;
+  if (isOAuth) headers['X-EBAY-API-IAF-TOKEN'] = userToken;
+
+  const epsUrl = c.env.EBAY_EPS_URL || 'https://api.ebay.com/ws/api.dll';
+  const res = await fetch(epsUrl, {
+    method: 'POST',
+    headers,
+    body: finalXml,
+  });
+  const text = await res.text();
+  return new Response(text, {
+    status: res.status,
+    headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+  });
+});
+
 // 1-Click Browser Publish Endpoint (Triggered when user clicks "🚀 Publish to eBay" button)
 app.get('/publish', async (c) => {
   const draftId = c.req.query('draftId');
@@ -118,10 +155,11 @@ app.post('/', async (c) => {
 
   // Helper to run background tasks safely via Cloudflare Workers ExecutionContext
   const waitUntil = (promise: Promise<any>) => {
+    const safePromise = promise.catch((err) => {
+      console.error('[Background] Unhandled error in background task:', err);
+    });
     if (c.executionCtx?.waitUntil) {
-      c.executionCtx.waitUntil(promise);
-    } else {
-      promise.catch((err) => console.error('[Background] Unhandled error:', err));
+      c.executionCtx.waitUntil(safePromise);
     }
   };
 
@@ -409,74 +447,74 @@ app.post('/', async (c) => {
     if (attachments.length > 0) {
       waitUntil(
         (async () => {
-          const imageAttachments = attachments.filter((att: any) => {
-            const mime = (att.contentType || '').toLowerCase();
-            return !mime || mime.startsWith('image/') || mime === 'application/octet-stream';
-          });
+          try {
+            const imageAttachments = attachments.filter((att: any) => {
+              const mime = (att.contentType || '').toLowerCase();
+              return !mime || mime.startsWith('image/') || mime === 'application/octet-stream';
+            });
 
-          const candidateAttachments = (imageAttachments.length > 0 ? imageAttachments : attachments).slice(0, 16);
-          console.log(`[Attachments] Processing ${attachments.length} attachments (candidate images: ${candidateAttachments.length})`);
+            const candidateAttachments = (imageAttachments.length > 0 ? imageAttachments : attachments).slice(0, 16);
+            console.log(`[Attachments] Processing ${attachments.length} attachments (candidate images: ${candidateAttachments.length})`);
 
-          // Download all attachments in parallel
-          const downloadResults = await Promise.all(
-            candidateAttachments.map(async (att: any, idx: number) => {
-              try {
-                const downloaded = await GoogleChatMediaService.downloadAttachmentAsBase64(
-                  att,
+            // Download all attachments in parallel
+            const downloadResults = await Promise.all(
+              candidateAttachments.map(async (att: any, idx: number) => {
+                try {
+                  const downloaded = await GoogleChatMediaService.downloadAttachmentAsBase64(
+                    att,
+                    c.env.GOOGLE_SERVICE_ACCOUNT_JSON
+                  );
+                  if (downloaded.base64) {
+                    return {
+                      index: idx,
+                      base64: downloaded.base64,
+                      mimeType: downloaded.mimeType,
+                    };
+                  }
+                } catch (err: any) {
+                  console.warn(`[Download] Attachment ${idx} download failed:`, err);
+                }
+                return null;
+              })
+            );
+
+            const rawImages = downloadResults.filter((img): img is NonNullable<typeof img> => img !== null);
+
+            if (rawImages.length === 0) {
+              const hasDrive = attachments.some((a: any) => a.driveDataRef?.driveFileId);
+              if (hasDrive) {
+                await GoogleChatMediaService.postMessage(
+                  spaceId,
+                  {
+                    ...(threadKey ? { thread: { name: threadKey } } : {}),
+                    text: '⚠️ Please upload images directly from your computer or phone (click the paperclip > **Upload from computer** or drag & drop), rather than selecting from Google Drive.',
+                  },
                   c.env.GOOGLE_SERVICE_ACCOUNT_JSON
                 );
-                if (downloaded.base64) {
-                  return {
-                    index: idx,
-                    base64: downloaded.base64,
-                    mimeType: downloaded.mimeType,
-                  };
-                }
-              } catch (err: any) {
-                console.warn(`[Download] Attachment ${idx} download failed:`, err);
+                return;
               }
-              return null;
-            })
-          );
 
-          const rawImages = downloadResults.filter((img): img is NonNullable<typeof img> => img !== null);
-
-          if (rawImages.length === 0) {
-            const hasDrive = attachments.some((a: any) => a.driveDataRef?.driveFileId);
-            if (hasDrive) {
               await GoogleChatMediaService.postMessage(
                 spaceId,
                 {
                   ...(threadKey ? { thread: { name: threadKey } } : {}),
-                  text: '⚠️ Please upload images directly from your computer or phone (click the paperclip > **Upload from computer** or drag & drop), rather than selecting from Google Drive.',
+                  text: '⚠️ Could not download the uploaded photo(s). Please try uploading image files directly.',
                 },
                 c.env.GOOGLE_SERVICE_ACCOUNT_JSON
               );
               return;
             }
 
-            await GoogleChatMediaService.postMessage(
-              spaceId,
-              {
-                ...(threadKey ? { thread: { name: threadKey } } : {}),
-                text: '⚠️ Could not download the uploaded photo(s). Please try uploading image files directly.',
-              },
-              c.env.GOOGLE_SERVICE_ACCOUNT_JSON
-            );
-            return;
-          }
+            // Automatically inspect EXIF while preserving 100% original photo quality & background
+            console.log(`[ImageProcessor] Processing ${rawImages.length} photo(s) (preserving 100% original fidelity)...`);
+            const validImages = rawImages.map((img) => {
+              const processed = ImageProcessor.processPhoto(img.base64);
+              return {
+                base64: processed.base64,
+                mimeType: processed.mimeType,
+              };
+            });
 
-          // Automatically correct EXIF orientation (upright) while preserving 100% original photo quality & background
-          console.log(`[ImageProcessor] Processing ${rawImages.length} photo(s) (orientation check & correction)...`);
-          const validImages = rawImages.map((img) => {
-            const processed = ImageProcessor.processPhoto(img.base64);
-            return {
-              base64: processed.base64,
-              mimeType: processed.mimeType,
-            };
-          });
-
-          try {
             const eps = new EbayEPSService({
               epsUrl: c.env.EBAY_EPS_URL,
               appId: c.env.EBAY_APP_ID,
@@ -491,11 +529,17 @@ app.post('/', async (c) => {
 
             if (isAddingToExisting) {
               console.log(`[Upload] Adding ${validImages.length} photo(s) to existing draft ${existingDraft.id}`);
-              const epsResults = await Promise.allSettled(
-                validImages.map((img, i) =>
-                  eps.uploadPicture(img.base64, `Photo-${Date.now()}-${existingDraft.imageUrls.length + i + 1}`)
-                )
-              );
+              const uploadBatchSize = 3;
+              const epsResults: PromiseSettledResult<string>[] = [];
+              for (let i = 0; i < validImages.length; i += uploadBatchSize) {
+                const batch = validImages.slice(i, i + uploadBatchSize);
+                const batchResults = await Promise.allSettled(
+                  batch.map((img, idx) =>
+                    eps.uploadPicture(img.base64, `Photo-${Date.now()}-${existingDraft.imageUrls.length + i + idx + 1}`)
+                  )
+                );
+                epsResults.push(...batchResults);
+              }
 
               const addedUrls = epsResults
                 .filter((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled')
@@ -523,7 +567,7 @@ app.post('/', async (c) => {
               return;
             }
 
-            // Brand new draft creation: run Gemini vision & EPS uploads in parallel
+            // Brand new draft creation: run Gemini vision & EPS uploads in batches
             const gemini = new GeminiService(c.env.GEMINI_API_KEY);
             const taxonomy = new EbayTaxonomyService({
               apiBase: c.env.EBAY_API_BASE,
@@ -531,14 +575,27 @@ app.post('/', async (c) => {
               certId: c.env.EBAY_CERT_ID,
             });
 
-            console.log(`[Processing] Analyzing ${validImages.length} photo(s) with Gemini Vision & uploading to eBay EPS...`);
+            console.log(`[Processing] Analyzing ${validImages.length} photo(s) with Gemini Vision & uploading to eBay EPS in batches...`);
+
+            // Upload to EPS in batches of 3 to avoid overwhelming connection and memory limits
+            const uploadBatchSize = 3;
+            const uploadEpsInBatches = async () => {
+              const allResults: PromiseSettledResult<string>[] = [];
+              for (let i = 0; i < validImages.length; i += uploadBatchSize) {
+                const batch = validImages.slice(i, i + uploadBatchSize);
+                const batchResults = await Promise.allSettled(
+                  batch.map((img, idx) =>
+                    eps.uploadPicture(img.base64, `Photo-${Date.now()}-${i + idx + 1}`)
+                  )
+                );
+                allResults.push(...batchResults);
+              }
+              return allResults;
+            };
+
             const [analysis, epsResults] = await Promise.all([
               gemini.analyzeItemImages(validImages, messageText),
-              Promise.allSettled(
-                validImages.map((img, i) =>
-                  eps.uploadPicture(img.base64, `Photo-${Date.now()}-${i + 1}`)
-                )
-              ),
+              uploadEpsInBatches(),
             ]);
 
             const newEpsUrls = epsResults
@@ -610,7 +667,7 @@ app.post('/', async (c) => {
             }
             await draftStore.saveDraft(draft);
           } catch (err: any) {
-            console.error('[Processing] Image processing error:', err);
+            console.error('[Processing] Fatal photo processing error:', err);
             const errCard = GoogleChatCards.buildErrorCard(
               `Error processing photo: ${err.message || err}`
             ).cardsV2[0];
@@ -806,38 +863,48 @@ app.post('/', async (c) => {
             );
           }
 
-          // 2. Save draft and update Card v2 preview
-          existingDraft.updatedAt = Date.now();
-          await draftStore.saveDraft(existingDraft);
+          // 2. Save draft and update Card v2 preview (only if draft is still in draft state, not published)
+          if (existingDraft.status !== 'PUBLISHED') {
+            existingDraft.updatedAt = Date.now();
+            await draftStore.saveDraft(existingDraft);
 
-          const previewCard = GoogleChatCards.buildListingPreviewCard(existingDraft).cardsV2[0];
+            const previewCard = GoogleChatCards.buildListingPreviewCard(existingDraft).cardsV2[0];
 
-          let patched = false;
-          if (existingDraft.messageName) {
-            const patchRes = await GoogleChatMediaService.patchMessage(
-              existingDraft.messageName,
-              { cardsV2: [previewCard] },
-              c.env.GOOGLE_SERVICE_ACCOUNT_JSON
-            );
-            if (patchRes) patched = true;
-          }
+            let patched = false;
+            if (existingDraft.messageName) {
+              const patchRes = await GoogleChatMediaService.patchMessage(
+                existingDraft.messageName,
+                { cardsV2: [previewCard] },
+                c.env.GOOGLE_SERVICE_ACCOUNT_JSON
+              );
+              if (patchRes) patched = true;
+            }
 
-          if (!patched && spaceId) {
-            const postRes = await GoogleChatMediaService.postMessage(
-              spaceId,
-              {
-                ...(threadKey ? { thread: { name: threadKey } } : {}),
-                cardsV2: [previewCard],
-              },
-              c.env.GOOGLE_SERVICE_ACCOUNT_JSON
-            );
-            if (postRes?.name) {
-              existingDraft.messageName = postRes.name;
-              await draftStore.saveDraft(existingDraft);
+            if (!patched && spaceId) {
+              const postRes = await GoogleChatMediaService.postMessage(
+                spaceId,
+                {
+                  ...(threadKey ? { thread: { name: threadKey } } : {}),
+                  cardsV2: [previewCard],
+                },
+                c.env.GOOGLE_SERVICE_ACCOUNT_JSON
+              );
+              if (postRes?.name) {
+                existingDraft.messageName = postRes.name;
+                await draftStore.saveDraft(existingDraft);
+              }
             }
           }
         } catch (geminiErr: any) {
           console.error('[Chat] Conversational error:', geminiErr);
+          await GoogleChatMediaService.postMessage(
+            spaceId,
+            {
+              ...(threadKey ? { thread: { name: threadKey } } : {}),
+              text: `⚠️ I encountered an issue processing your request: ${geminiErr.message || geminiErr}. Please try again!`,
+            },
+            c.env.GOOGLE_SERVICE_ACCOUNT_JSON
+          );
         }
       })()
     );

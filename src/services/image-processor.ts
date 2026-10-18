@@ -1,5 +1,3 @@
-import * as jpeg from 'jpeg-js';
-
 export class ImageProcessor {
   /**
    * Reads the EXIF orientation tag from raw JPEG bytes without decoding the full image.
@@ -68,134 +66,33 @@ export class ImageProcessor {
   }
 
   /**
-   * Rotates pixel matrix according to EXIF orientation so image displays upright.
-   */
-  static rotatePixels(
-    srcData: Uint8Array,
-    width: number,
-    height: number,
-    orientation: number
-  ): { data: Uint8Array; width: number; height: number } {
-    if (orientation === 6) {
-      // 90° Clockwise
-      const newWidth = height;
-      const newHeight = width;
-      const dest = new Uint8Array(newWidth * newHeight * 4);
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const srcIdx = (y * width + x) * 4;
-          const destX = height - 1 - y;
-          const destY = x;
-          const destIdx = (destY * newWidth + destX) * 4;
-          dest[destIdx] = srcData[srcIdx];
-          dest[destIdx + 1] = srcData[srcIdx + 1];
-          dest[destIdx + 2] = srcData[srcIdx + 2];
-          dest[destIdx + 3] = srcData[srcIdx + 3];
-        }
-      }
-      return { data: dest, width: newWidth, height: newHeight };
-    }
-
-    if (orientation === 8) {
-      // 270° Clockwise (90° CCW)
-      const newWidth = height;
-      const newHeight = width;
-      const dest = new Uint8Array(newWidth * newHeight * 4);
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const srcIdx = (y * width + x) * 4;
-          const destX = y;
-          const destY = width - 1 - x;
-          const destIdx = (destY * newWidth + destX) * 4;
-          dest[destIdx] = srcData[srcIdx];
-          dest[destIdx + 1] = srcData[srcIdx + 1];
-          dest[destIdx + 2] = srcData[srcIdx + 2];
-          dest[destIdx + 3] = srcData[srcIdx + 3];
-        }
-      }
-      return { data: dest, width: newWidth, height: newHeight };
-    }
-
-    if (orientation === 3) {
-      // 180° Rotation
-      const dest = new Uint8Array(width * height * 4);
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const srcIdx = (y * width + x) * 4;
-          const destX = width - 1 - x;
-          const destY = height - 1 - y;
-          const destIdx = (destY * width + destX) * 4;
-          dest[destIdx] = srcData[srcIdx];
-          dest[destIdx + 1] = srcData[srcIdx + 1];
-          dest[destIdx + 2] = srcData[srcIdx + 2];
-          dest[destIdx + 3] = srcData[srcIdx + 3];
-        }
-      }
-      return { data: dest, width, height };
-    }
-
-    return { data: srcData, width, height };
-  }
-
-  /**
    * Photo processing:
-   * 1. Detects EXIF orientation.
-   * 2. If orientation is 1 (normal/upright), returns the original photo untouched (zero loss / original background).
-   * 3. If orientation is rotated (3, 6, 8), rotates pixels to upright orientation.
+   * Preserves 100% original photo pixels, background, and camera fidelity without lossy re-encoding.
+   * EXIF metadata (including orientation) remains intact in the JPEG header for eBay Picture Services
+   * and Gemini Vision, which handle orientation natively.
    */
-  static processPhoto(base64Input: string): { base64: string; mimeType: string } {
+  static processPhoto(base64Input: string): { base64: string; mimeType: string; orientation: number } {
     try {
-      const binaryString = atob(base64Input);
-      const len = binaryString.length;
-      const bytes = new Uint8Array(len);
+      // Inspect first 64KB for EXIF orientation header
+      const binaryString = atob(base64Input.slice(0, 87382));
+      const len = Math.min(binaryString.length, 65536);
+      const headerBytes = new Uint8Array(len);
       for (let i = 0; i < len; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
+        headerBytes[i] = binaryString.charCodeAt(i);
       }
 
-      // 1. Detect orientation
-      const orientation = this.getExifOrientation(bytes);
-
-      // If already upright (orientation <= 1), keep original image untouched
-      if (orientation <= 1) {
-        return { base64: base64Input, mimeType: 'image/jpeg' };
-      }
-
-      console.log(`[ImageProcessor] Correcting EXIF orientation ${orientation} to upright...`);
-
-      // 2. Decode JPEG
-      const decoded = jpeg.decode(bytes, { useTArray: true, maxMemoryUsageInMB: 256 });
-      if (!decoded || !decoded.data) {
-        return { base64: base64Input, mimeType: 'image/jpeg' };
-      }
-
-      // 3. Rotate to upright
-      const rotated = this.rotatePixels(decoded.data, decoded.width, decoded.height, orientation);
-
-      // 4. Re-encode to high quality JPEG
-      const reencoded = jpeg.encode(
-        {
-          data: rotated.data,
-          width: rotated.width,
-          height: rotated.height,
-        },
-        95
-      );
-
-      // 5. Convert back to base64
-      let outBinary = '';
-      const outBytes = reencoded.data;
-      const chunkSize = 8192;
-      for (let i = 0; i < outBytes.length; i += chunkSize) {
-        outBinary += String.fromCharCode(...outBytes.subarray(i, i + chunkSize));
-      }
-
+      const orientation = this.getExifOrientation(headerBytes);
       return {
-        base64: btoa(outBinary),
+        base64: base64Input,
         mimeType: 'image/jpeg',
+        orientation,
       };
     } catch (err) {
-      console.warn('[ImageProcessor] Processing error, using original photo:', err);
-      return { base64: base64Input, mimeType: 'image/jpeg' };
+      return {
+        base64: base64Input,
+        mimeType: 'image/jpeg',
+        orientation: 1,
+      };
     }
   }
 }
