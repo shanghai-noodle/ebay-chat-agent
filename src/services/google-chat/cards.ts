@@ -395,7 +395,7 @@ export class GoogleChatCards {
                   {
                     decoratedText: {
                       topLabel: 'Worksheets Included',
-                      text: `• <b>Inventory Details:</b> All ${report.totalListings} active items with Item IDs, prices, quantities, formulas, and direct eBay URLs.<br>• <b>Executive Summary:</b> Portfolio KPI cards, dynamic formulas, category breakdown %, and store links.`,
+                      text: `• <b>Market Research & CMA:</b> All ${report.totalListings} active items with Item IDs, prices, active low/high comps, sold averages, item descriptions, and pricing strategy notes.<br>• <b>Executive Summary:</b> Portfolio KPI cards, pricing competitiveness breakdown %, market comps variance %, and store links.`,
                       wrapText: true,
                     },
                   },

@@ -455,10 +455,22 @@ app.post('/', async (c) => {
               throw new Error('Missing GOOGLE_SERVICE_ACCOUNT_JSON');
             }
             const kvSheetId = (await c.env.DRAFTS_KV?.get('report:master_sheet_id')) || undefined;
+            let cmaData: any = null;
+            try {
+              const cachedCma = await c.env.DRAFTS_KV?.get('report:cma_market_research_v1');
+              if (cachedCma) {
+                cmaData = JSON.parse(cachedCma);
+              }
+            } catch (cmaErr) {
+              console.warn('[CMA] Failed to read cached CMA data for button report:', cmaErr);
+            }
+
             const sheetsService = new GoogleSheetsService(c.env.GOOGLE_SERVICE_ACCOUNT_JSON);
             const report = await sheetsService.createInventorySpreadsheet(inventorySummary, {
               spreadsheetId: kvSheetId,
               userEmail: params.userEmail,
+              clearExisting: true,
+              cmaData,
             });
 
             if (report.spreadsheetId && c.env.DRAFTS_KV) {
@@ -807,7 +819,18 @@ app.post('/', async (c) => {
           ) ||
           /\b(237\d{9}|336\d{9}|334\d{9}|234\d{9})\b/.test(messageText);
 
-        const handleSheetReportRequest = async (targetSheetId?: string) => {
+        // Check if user provided a Google Sheet URL or ID
+        const sheetMatch =
+          messageText.match(/https:\/\/docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9-_]{20,})/i) ||
+          messageText.match(/sheet(?:\s*id)?[:\s]+([a-zA-Z0-9-_]{25,})/i) ||
+          messageText.match(/\b(1[a-zA-Z0-9-_]{35,45})\b/i);
+
+        const targetSheetId = sheetMatch ? sheetMatch[1] : undefined;
+        if (targetSheetId && c.env.DRAFTS_KV) {
+          await c.env.DRAFTS_KV.put('report:master_sheet_id', targetSheetId);
+        }
+
+        const handleSheetReportRequest = async (explicitSheetId?: string) => {
           if (!inventorySummary || inventorySummary.totalCount === 0) {
             await GoogleChatMediaService.postMessage(
               spaceId,
@@ -825,12 +848,26 @@ app.post('/', async (c) => {
               throw new Error('Missing GOOGLE_SERVICE_ACCOUNT_JSON in environment');
             }
             const kvSheetId = (await c.env.DRAFTS_KV?.get('report:master_sheet_id')) || undefined;
-            const effectiveSheetId = targetSheetId || kvSheetId;
+            const effectiveSheetId = explicitSheetId || targetSheetId || kvSheetId;
+
+            let cmaData: any = null;
+            try {
+              const cachedCma = await c.env.DRAFTS_KV?.get('report:cma_market_research_v1');
+              if (cachedCma) {
+                cmaData = JSON.parse(cachedCma);
+              }
+            } catch (cmaErr) {
+              console.warn('[CMA] Failed to read cached CMA data:', cmaErr);
+            }
+
+            const isClearRequested = /\b(clear|wipe|overwrite|fresh|clean)\b/i.test(messageText);
 
             const sheetsService = new GoogleSheetsService(c.env.GOOGLE_SERVICE_ACCOUNT_JSON);
             const report = await sheetsService.createInventorySpreadsheet(inventorySummary, {
               spreadsheetId: effectiveSheetId,
               userEmail: senderEmail,
+              clearExisting: isClearRequested || Boolean(effectiveSheetId),
+              cmaData,
             });
 
             if (report.spreadsheetId && c.env.DRAFTS_KV) {
@@ -870,22 +907,22 @@ app.post('/', async (c) => {
           }
         };
 
-        // If user pasted a Google Sheets URL anywhere in message
-        const sheetUrlMatch = messageText.match(/https:\/\/docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/i);
-        if (sheetUrlMatch) {
-          const pastedSheetId = sheetUrlMatch[1];
-          if (c.env.DRAFTS_KV) {
-            await c.env.DRAFTS_KV.put('report:master_sheet_id', pastedSheetId);
-          }
+        const isPureLink =
+          targetSheetId &&
+          (messageText.trim().startsWith('http') ||
+            messageText.trim().length <= 50 ||
+            /^(link|set|use|here is|here's)?\s*(my\s*)?(google\s*)?sheet/i.test(messageText.trim()));
+
+        if (isPureLink) {
           await GoogleChatMediaService.postMessage(
             spaceId,
             {
               ...(threadKey ? { thread: { name: threadKey } } : {}),
-              text: '🔗 Linking your Google Sheet and updating your active inventory report...',
+              text: '🔗 Linking your Google Sheet and updating your market research and inventory report...',
             },
             c.env.GOOGLE_SERVICE_ACCOUNT_JSON
           );
-          await handleSheetReportRequest(pastedSheetId);
+          await handleSheetReportRequest(targetSheetId);
           return;
         }
 
@@ -899,7 +936,9 @@ app.post('/', async (c) => {
               spaceId,
               {
                 ...(threadKey ? { thread: { name: threadKey } } : {}),
-                text: chatResult.replyText || '👋 Hi! Upload a photo of any item you want to sell, and I will draft a listing, estimate pricing, and publish it to eBay for you!',
+                text:
+                  chatResult.replyText ||
+                  '👋 Hi! Upload a photo of any item you want to sell, and I will draft a listing, estimate pricing, and publish it to eBay for you!',
               },
               c.env.GOOGLE_SERVICE_ACCOUNT_JSON
             );
@@ -907,10 +946,13 @@ app.post('/', async (c) => {
             // 2. If user requested a Google Sheet report, generate and post it
             const isSheetRequested =
               chatResult.isSheetExportRequested ||
-              /\b(google\s+sheets?|sheets?|spreadsheets?|excel|csv|export\s+to\s+sheets?|reporting)\b/i.test(messageText);
+              Boolean(targetSheetId) ||
+              /\b(google\s+sheets?|sheets?|spreadsheets?|excel|csv|export\s+to\s+sheets?|reporting|report|market\s+research|comps)\b/i.test(
+                messageText
+              );
 
             if (isSheetRequested) {
-              await handleSheetReportRequest();
+              await handleSheetReportRequest(targetSheetId);
             } else if (
               (isInventoryQuery || chatResult.isInventoryInquiry) &&
               inventorySummary &&
