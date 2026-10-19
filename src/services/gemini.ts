@@ -90,16 +90,17 @@ const EXTRACTION_SCHEMA = {
 
 export class GeminiService {
   private apiKey: string;
-  private candidateModels = ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3-flash-preview'];
+  private listingModels = ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.5-flash'];
+  private queryModels = ['gemini-4-argon', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-flash-latest'];
 
   constructor(apiKey: string) {
     this.apiKey = apiKey;
   }
 
-  private async callInteractionsApi(payload: any): Promise<string> {
+  private async callInteractionsApi(payload: any, models: string[] = this.listingModels): Promise<string> {
     let lastError: Error | undefined;
 
-    for (const model of this.candidateModels) {
+    for (const model of models) {
       try {
         const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/interactions?key=${this.apiKey}`, {
           method: 'POST',
@@ -111,7 +112,7 @@ export class GeminiService {
           const errData = (await res.json().catch(() => ({}))) as any;
           const msg = errData?.error?.message || res.statusText;
           lastError = new Error(`Gemini ${model} failed (${res.status}): ${msg}`);
-          console.warn(`[Gemini] ${model} error: ${msg}. Attempting fallback if available.`);
+          console.warn(`[Gemini] ${model} error: ${msg}. Attempting fallback model.`);
           continue;
         }
 
@@ -124,6 +125,7 @@ export class GeminiService {
           continue;
         }
 
+        console.log(`[Gemini] Successfully generated response using model: ${model}`);
         return outputText;
       } catch (err: any) {
         lastError = err;
@@ -394,7 +396,7 @@ Instructions:
             required: ['replyText', 'hasDraftUpdates'],
           },
         },
-      });
+      }, this.queryModels);
 
       return JSON.parse(outputText);
     } catch (err: any) {
