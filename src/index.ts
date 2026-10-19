@@ -8,7 +8,11 @@ import { EbayTaxonomyService } from './services/ebay/taxonomy';
 import { EbayTradingService, SellerInventorySummary } from './services/ebay/trading';
 import { GoogleChatCards } from './services/google-chat/cards';
 import { GoogleChatMediaService } from './services/google-chat/media';
-import { GoogleSheetsService, GoogleSheetsApiDisabledError } from './services/google-sheets';
+import {
+  GoogleSheetsService,
+  GoogleSheetsApiDisabledError,
+  GoogleSheetsDriveQuotaError,
+} from './services/google-sheets';
 import { AVATAR_BASE64 } from './assets/avatar-data';
 import { ImageProcessor } from './services/image-processor';
 
@@ -450,10 +454,16 @@ app.post('/', async (c) => {
             if (!c.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
               throw new Error('Missing GOOGLE_SERVICE_ACCOUNT_JSON');
             }
+            const kvSheetId = (await c.env.DRAFTS_KV?.get('report:master_sheet_id')) || undefined;
             const sheetsService = new GoogleSheetsService(c.env.GOOGLE_SERVICE_ACCOUNT_JSON);
             const report = await sheetsService.createInventorySpreadsheet(inventorySummary, {
+              spreadsheetId: kvSheetId,
               userEmail: params.userEmail,
             });
+
+            if (report.spreadsheetId && c.env.DRAFTS_KV) {
+              await c.env.DRAFTS_KV.put('report:master_sheet_id', report.spreadsheetId);
+            }
 
             const sheetCard = GoogleChatCards.buildSheetCreatedCard(report).cardsV2[0];
             await GoogleChatMediaService.postMessage(
@@ -469,6 +479,8 @@ app.post('/', async (c) => {
             let errCard: any;
             if (err instanceof GoogleSheetsApiDisabledError) {
               errCard = GoogleChatCards.buildSheetApiDisabledCard(err.activationUrl).cardsV2[0];
+            } else if (err instanceof GoogleSheetsDriveQuotaError) {
+              errCard = GoogleChatCards.buildLinkSheetCard(err.serviceAccountEmail).cardsV2[0];
             } else {
               errCard = GoogleChatCards.buildErrorCard(
                 `Failed to create Google Sheet: ${err.message || err}`
@@ -795,7 +807,7 @@ app.post('/', async (c) => {
           ) ||
           /\b(237\d{9}|336\d{9}|334\d{9}|234\d{9})\b/.test(messageText);
 
-        const handleSheetReportRequest = async () => {
+        const handleSheetReportRequest = async (targetSheetId?: string) => {
           if (!inventorySummary || inventorySummary.totalCount === 0) {
             await GoogleChatMediaService.postMessage(
               spaceId,
@@ -812,10 +824,18 @@ app.post('/', async (c) => {
             if (!c.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
               throw new Error('Missing GOOGLE_SERVICE_ACCOUNT_JSON in environment');
             }
+            const kvSheetId = (await c.env.DRAFTS_KV?.get('report:master_sheet_id')) || undefined;
+            const effectiveSheetId = targetSheetId || kvSheetId;
+
             const sheetsService = new GoogleSheetsService(c.env.GOOGLE_SERVICE_ACCOUNT_JSON);
             const report = await sheetsService.createInventorySpreadsheet(inventorySummary, {
+              spreadsheetId: effectiveSheetId,
               userEmail: senderEmail,
             });
+
+            if (report.spreadsheetId && c.env.DRAFTS_KV) {
+              await c.env.DRAFTS_KV.put('report:master_sheet_id', report.spreadsheetId);
+            }
 
             const sheetCard = GoogleChatCards.buildSheetCreatedCard(report).cardsV2[0];
             await GoogleChatMediaService.postMessage(
@@ -831,6 +851,8 @@ app.post('/', async (c) => {
             let errCard: any;
             if (err instanceof GoogleSheetsApiDisabledError) {
               errCard = GoogleChatCards.buildSheetApiDisabledCard(err.activationUrl).cardsV2[0];
+            } else if (err instanceof GoogleSheetsDriveQuotaError) {
+              errCard = GoogleChatCards.buildLinkSheetCard(err.serviceAccountEmail).cardsV2[0];
             } else {
               errCard = GoogleChatCards.buildErrorCard(
                 `Failed to generate Google Sheet: ${err.message || err}`
@@ -847,6 +869,25 @@ app.post('/', async (c) => {
             );
           }
         };
+
+        // If user pasted a Google Sheets URL anywhere in message
+        const sheetUrlMatch = messageText.match(/https:\/\/docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/i);
+        if (sheetUrlMatch) {
+          const pastedSheetId = sheetUrlMatch[1];
+          if (c.env.DRAFTS_KV) {
+            await c.env.DRAFTS_KV.put('report:master_sheet_id', pastedSheetId);
+          }
+          await GoogleChatMediaService.postMessage(
+            spaceId,
+            {
+              ...(threadKey ? { thread: { name: threadKey } } : {}),
+              text: '🔗 Linking your Google Sheet and updating your active inventory report...',
+            },
+            c.env.GOOGLE_SERVICE_ACCOUNT_JSON
+          );
+          await handleSheetReportRequest(pastedSheetId);
+          return;
+        }
 
         if (!existingDraft) {
           try {

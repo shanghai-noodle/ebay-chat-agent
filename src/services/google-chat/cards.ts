@@ -481,4 +481,74 @@ export class GoogleChatCards {
       ],
     };
   }
+
+  /**
+   * Card rendered when a Google Sheet needs to be linked/shared with the service account.
+   */
+  static buildLinkSheetCard(serviceAccountEmail: string): any {
+    return {
+      cardsV2: [
+        {
+          cardId: `sheet-link-${Date.now()}`,
+          card: {
+            header: {
+              title: '📋 Link a Google Sheet to Your Agent',
+              subtitle: 'One-Time Setup (Takes 30 seconds)',
+              imageUrl: 'https://ssl.gstatic.com/docs/doclist/images/mediatype/icon_1_spreadsheet_x64.png',
+              imageType: 'SQUARE',
+            },
+            sections: [
+              {
+                header: 'Setup Instructions',
+                widgets: [
+                  {
+                    decoratedText: {
+                      topLabel: 'Why is this needed?',
+                      text: 'Google Cloud service accounts have a 0-byte personal Drive quota by design. To allow your agent to generate and update reports, simply share any Google Sheet with your agent!',
+                      wrapText: true,
+                    },
+                  },
+                  {
+                    decoratedText: {
+                      topLabel: 'Step 1: Open a Blank Sheet',
+                      text: 'Open <b><a href="https://sheets.new">sheets.new</a></b> (or any existing Google Sheet in your Drive).',
+                      wrapText: true,
+                    },
+                  },
+                  {
+                    decoratedText: {
+                      topLabel: 'Step 2: Share with Agent Email',
+                      text: `Click <b>Share</b> in the top right and add your bot as <b>Editor</b>:<br><font color="#1a73e8"><b>${serviceAccountEmail}</b></font>`,
+                      wrapText: true,
+                    },
+                  },
+                  {
+                    decoratedText: {
+                      topLabel: 'Step 3: Paste Sheet Link Here',
+                      text: 'Paste your sheet link here in chat, and I will instantly populate and format your full inventory report!',
+                      wrapText: true,
+                    },
+                  },
+                  {
+                    buttonList: {
+                      buttons: [
+                        {
+                          text: '📄 Open sheets.new',
+                          onClick: {
+                            openLink: {
+                              url: 'https://sheets.new',
+                            },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    };
+  }
 }

@@ -15,9 +15,20 @@ export class GoogleSheetsApiDisabledError extends Error {
   }
 }
 
+export class GoogleSheetsDriveQuotaError extends Error {
+  public serviceAccountEmail: string;
+
+  constructor(message: string, serviceAccountEmail: string) {
+    super(message);
+    this.name = 'GoogleSheetsDriveQuotaError';
+    this.serviceAccountEmail = serviceAccountEmail;
+  }
+}
+
 export interface CreateReportOptions {
   title?: string;
   userEmail?: string;
+  spreadsheetId?: string;
 }
 
 export interface SpreadsheetReportResult {
@@ -26,12 +37,13 @@ export interface SpreadsheetReportResult {
   totalListings: number;
   totalValue: number;
   sheetTitle: string;
+  isExistingSheet?: boolean;
 }
 
 export class GoogleSheetsService {
   constructor(private serviceAccountConfig: string | ServiceAccountCredentials) {}
 
-  private getCredentials(): ServiceAccountCredentials {
+  public getCredentials(): ServiceAccountCredentials {
     if (typeof this.serviceAccountConfig === 'string') {
       try {
         return JSON.parse(this.serviceAccountConfig);
@@ -51,14 +63,18 @@ export class GoogleSheetsService {
   }
 
   /**
-   * Generates a fully formatted, executive-ready Google Sheets inventory report
-   * and configures public/user permissions via Google Drive API.
+   * Generates or updates an executive-ready Google Sheets inventory report.
+   * Supports:
+   * 1. Writing directly to a provided spreadsheetId.
+   * 2. Auto-discovering any Google Sheet shared with the service account.
+   * 3. Creating a new spreadsheet (if Drive quota allows, e.g. in a Shared Drive).
    */
   async createInventorySpreadsheet(
     inventory: SellerInventorySummary,
     options?: CreateReportOptions
   ): Promise<SpreadsheetReportResult> {
     const token = await this.getAccessToken();
+    const creds = this.getCredentials();
 
     const formattedDate = new Date().toLocaleDateString('en-US', {
       year: 'numeric',
@@ -66,80 +82,210 @@ export class GoogleSheetsService {
       day: 'numeric',
     });
     const sheetTitle = options?.title || `eBay Inventory Report - ly014132 (${formattedDate})`;
-
     const items = inventory.items || [];
     const rowCount = Math.max(100, items.length + 15);
 
-    // 1. Create Spreadsheet with two structured worksheets
-    const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        properties: {
-          title: sheetTitle,
+    let spreadsheetId = options?.spreadsheetId;
+    let isExistingSheet = false;
+
+    // 1. If no explicit spreadsheetId, check if any sheet was shared with this service account
+    if (!spreadsheetId) {
+      try {
+        const driveSearchRes = await fetch(
+          "https://www.googleapis.com/drive/v3/files?q=mimeType='application/vnd.google-apps.spreadsheet' and trashed=false&orderBy=modifiedTime desc&pageSize=1&fields=files(id,name)",
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+        if (driveSearchRes.ok) {
+          const driveData = (await driveSearchRes.json()) as any;
+          if (Array.isArray(driveData.files) && driveData.files.length > 0) {
+            spreadsheetId = driveData.files[0].id;
+            isExistingSheet = true;
+            console.log(
+              `[GoogleSheets] Auto-discovered shared spreadsheet: ${spreadsheetId} ("${driveData.files[0].name}")`
+            );
+          }
+        }
+      } catch (searchErr) {
+        console.warn('[GoogleSheets] Drive search error:', searchErr);
+      }
+    }
+
+    // 2. If still no spreadsheetId, attempt to create a new spreadsheet
+    if (!spreadsheetId) {
+      const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
         },
-        sheets: [
-          {
-            properties: {
-              sheetId: 0,
-              title: 'Inventory Details',
-              gridProperties: {
-                frozenRowCount: 1,
-                rowCount: rowCount,
-                columnCount: 10,
+        body: JSON.stringify({
+          properties: {
+            title: sheetTitle,
+          },
+          sheets: [
+            {
+              properties: {
+                sheetId: 0,
+                title: 'Inventory Details',
+                gridProperties: {
+                  frozenRowCount: 1,
+                  rowCount: rowCount,
+                  columnCount: 10,
+                },
               },
             },
-          },
-          {
-            properties: {
-              sheetId: 1,
-              title: 'Executive Summary',
-              gridProperties: {
-                frozenRowCount: 1,
-                rowCount: 35,
-                columnCount: 6,
+            {
+              properties: {
+                sheetId: 1,
+                title: 'Executive Summary',
+                gridProperties: {
+                  frozenRowCount: 1,
+                  rowCount: 35,
+                  columnCount: 6,
+                },
               },
             },
-          },
-        ],
-      }),
-    });
+          ],
+        }),
+      });
 
-    if (!createRes.ok) {
-      const errJson = (await createRes.json().catch(() => null)) as any;
-      const errMsg = errJson?.error?.message || (await createRes.text().catch(() => 'Unknown error'));
-      const status = errJson?.error?.status || '';
+      if (!createRes.ok) {
+        const errJson = (await createRes.json().catch(() => null)) as any;
+        const errMsg = errJson?.error?.message || (await createRes.text().catch(() => 'Unknown error'));
+        const status = errJson?.error?.status || '';
 
-      if (createRes.status === 403 || errMsg.includes('SERVICE_DISABLED') || errMsg.includes('has not been used')) {
-        let activationUrl = '';
-        if (Array.isArray(errJson?.error?.details)) {
-          for (const d of errJson.error.details) {
-            if (d.metadata?.activationUrl) {
-              activationUrl = d.metadata.activationUrl;
-              break;
-            }
-            if (Array.isArray(d.links)) {
-              const helpLink = d.links.find((l: any) => l.url?.includes('overview'));
-              if (helpLink) {
-                activationUrl = helpLink.url;
+        // Case A: Google Sheets API is disabled on GCP
+        if (createRes.status === 403 && (errMsg.includes('SERVICE_DISABLED') || errMsg.includes('has not been used'))) {
+          let activationUrl = '';
+          if (Array.isArray(errJson?.error?.details)) {
+            for (const d of errJson.error.details) {
+              if (d.metadata?.activationUrl) {
+                activationUrl = d.metadata.activationUrl;
                 break;
+              }
+              if (Array.isArray(d.links)) {
+                const helpLink = d.links.find((l: any) => l.url?.includes('overview'));
+                if (helpLink) {
+                  activationUrl = helpLink.url;
+                  break;
+                }
               }
             }
           }
+          throw new GoogleSheetsApiDisabledError(errMsg, activationUrl);
         }
-        throw new GoogleSheetsApiDisabledError(errMsg, activationUrl);
+
+        // Case B: Google Service Account has 0-byte Drive storage quota (standard Google Cloud behavior)
+        if (
+          createRes.status === 403 ||
+          errMsg.includes('The caller does not have permission') ||
+          errMsg.includes('storageQuotaExceeded') ||
+          errMsg.includes('quota')
+        ) {
+          throw new GoogleSheetsDriveQuotaError(
+            `Service accounts have 0-byte Drive storage quota and cannot own files. Please link an existing sheet shared with ${creds.client_email}`,
+            creds.client_email
+          );
+        }
+
+        throw new Error(`Google Sheets API error (${createRes.status} ${status}): ${errMsg}`);
       }
 
-      throw new Error(`Google Sheets API error (${createRes.status} ${status}): ${errMsg}`);
+      const createdData = (await createRes.json()) as { spreadsheetId: string; spreadsheetUrl: string };
+      spreadsheetId = createdData.spreadsheetId;
     }
 
-    const createdData = (await createRes.json()) as { spreadsheetId: string; spreadsheetUrl: string };
-    const spreadsheetId = createdData.spreadsheetId;
+    // 3. Inspect existing spreadsheet to ensure required worksheets exist
+    let detailsSheetId = 0;
+    let summarySheetId = 1;
 
-    // 2. Populate values across both sheets
+    try {
+      const metaRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (metaRes.ok) {
+        const meta = (await metaRes.json()) as any;
+        const existingSheets: any[] = meta.sheets || [];
+
+        const foundDetails = existingSheets.find((s) => s.properties?.title === 'Inventory Details');
+        const foundSummary = existingSheets.find((s) => s.properties?.title === 'Executive Summary');
+
+        const setupRequests: any[] = [];
+
+        if (foundDetails) {
+          detailsSheetId = foundDetails.properties.sheetId;
+        } else if (existingSheets.length > 0) {
+          // Rename the first default sheet (e.g. "Sheet1") to "Inventory Details"
+          detailsSheetId = existingSheets[0].properties.sheetId;
+          setupRequests.push({
+            updateSheetProperties: {
+              properties: {
+                sheetId: detailsSheetId,
+                title: 'Inventory Details',
+                gridProperties: {
+                  frozenRowCount: 1,
+                  rowCount: rowCount,
+                  columnCount: 10,
+                },
+              },
+              fields: 'title,gridProperties(frozenRowCount,rowCount,columnCount)',
+            },
+          });
+        } else {
+          detailsSheetId = Math.floor(Math.random() * 800000) + 10000;
+          setupRequests.push({
+            addSheet: {
+              properties: {
+                sheetId: detailsSheetId,
+                title: 'Inventory Details',
+                gridProperties: {
+                  frozenRowCount: 1,
+                  rowCount: rowCount,
+                  columnCount: 10,
+                },
+              },
+            },
+          });
+        }
+
+        if (foundSummary) {
+          summarySheetId = foundSummary.properties.sheetId;
+        } else {
+          summarySheetId = detailsSheetId + 1001;
+          setupRequests.push({
+            addSheet: {
+              properties: {
+                sheetId: summarySheetId,
+                title: 'Executive Summary',
+                gridProperties: {
+                  frozenRowCount: 1,
+                  rowCount: 35,
+                  columnCount: 6,
+                },
+              },
+            },
+          });
+        }
+
+        if (setupRequests.length > 0) {
+          await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ requests: setupRequests }),
+          });
+        }
+      }
+    } catch (metaErr) {
+      console.warn('[GoogleSheets] Metadata inspection error (falling back to defaults):', metaErr);
+    }
+
+    // 4. Populate values across both worksheets
     const detailHeaders = [
       'Item ID',
       'Title',
@@ -180,7 +326,13 @@ export class GoogleSheetsService {
       ['Total Portfolio Retail Value', "=SUM('Inventory Details'!G2:G)", 'Cumulative asking price across inventory'],
       ['Average Listing Price', "=AVERAGE('Inventory Details'!E2:E)", 'Mean asking price per active item'],
       ['Total Units Available', "=SUM('Inventory Details'!F2:F)", 'Sum of all physical items in stock'],
-      ['Top Valued Item', inventory.topValuable[0] ? `${inventory.topValuable[0].title} ($${inventory.topValuable[0].price.toFixed(2)})` : 'N/A', 'Highest listing price in inventory'],
+      [
+        'Top Valued Item',
+        inventory.topValuable[0]
+          ? `${inventory.topValuable[0].title} ($${inventory.topValuable[0].price.toFixed(2)})`
+          : 'N/A',
+        'Highest listing price in inventory',
+      ],
       ['Report Generated At', `${nowPacific} (Pacific)`, 'Live snapshot synced with eBay'],
       ['Store Owner', 'ly014132', 'Authentic California Collectibles'],
       ['Storefront Showcase', 'https://bluestonelab.trade', 'Custom online showcase storefront'],
@@ -222,13 +374,13 @@ export class GoogleSheetsService {
       console.warn('[GoogleSheets] Failed to populate values:', await valuesUpdateRes.text());
     }
 
-    // 3. Apply professional styles, formatting, and auto-fit column widths
+    // 5. Apply professional styles, formatting, and auto-fit column widths
     const formatRequests: any[] = [
-      // Format Inventory Details Header (A1:I1)
+      // Format Inventory Details Header
       {
         repeatCell: {
           range: {
-            sheetId: 0,
+            sheetId: detailsSheetId,
             startRowIndex: 0,
             endRowIndex: 1,
             startColumnIndex: 0,
@@ -249,11 +401,11 @@ export class GoogleSheetsService {
           fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
         },
       },
-      // Format Currency in Columns E (index 4) and G (index 6) for all item rows
+      // Format Currency in Columns E and G
       {
         repeatCell: {
           range: {
-            sheetId: 0,
+            sheetId: detailsSheetId,
             startRowIndex: 1,
             endRowIndex: items.length + 1,
             startColumnIndex: 4,
@@ -274,7 +426,7 @@ export class GoogleSheetsService {
       {
         repeatCell: {
           range: {
-            sheetId: 0,
+            sheetId: detailsSheetId,
             startRowIndex: 1,
             endRowIndex: items.length + 1,
             startColumnIndex: 6,
@@ -296,7 +448,7 @@ export class GoogleSheetsService {
       {
         repeatCell: {
           range: {
-            sheetId: 0,
+            sheetId: detailsSheetId,
             startRowIndex: 1,
             endRowIndex: items.length + 1,
             startColumnIndex: 0,
@@ -313,7 +465,7 @@ export class GoogleSheetsService {
       {
         repeatCell: {
           range: {
-            sheetId: 0,
+            sheetId: detailsSheetId,
             startRowIndex: 1,
             endRowIndex: items.length + 1,
             startColumnIndex: 5,
@@ -330,7 +482,7 @@ export class GoogleSheetsService {
       {
         repeatCell: {
           range: {
-            sheetId: 0,
+            sheetId: detailsSheetId,
             startRowIndex: 1,
             endRowIndex: items.length + 1,
             startColumnIndex: 7,
@@ -348,7 +500,7 @@ export class GoogleSheetsService {
       {
         repeatCell: {
           range: {
-            sheetId: 1,
+            sheetId: summarySheetId,
             startRowIndex: 0,
             endRowIndex: 1,
             startColumnIndex: 0,
@@ -356,7 +508,7 @@ export class GoogleSheetsService {
           },
           cell: {
             userEnteredFormat: {
-              backgroundColor: { red: 0.06, green: 0.62, blue: 0.35 }, // Google Sheets Green
+              backgroundColor: { red: 0.06, green: 0.62, blue: 0.35 }, // Sheets Green
               textFormat: {
                 foregroundColor: { red: 1, green: 1, blue: 1 },
                 bold: true,
@@ -372,7 +524,7 @@ export class GoogleSheetsService {
       {
         repeatCell: {
           range: {
-            sheetId: 1,
+            sheetId: summarySheetId,
             startRowIndex: 1,
             endRowIndex: 2,
             startColumnIndex: 0,
@@ -391,11 +543,11 @@ export class GoogleSheetsService {
           fields: 'userEnteredFormat(backgroundColor,textFormat)',
         },
       },
-      // Format Percentage for Category Breakdown (Sheet 1, Column C, rows 13 to end)
+      // Format Percentage for Category Breakdown
       {
         repeatCell: {
           range: {
-            sheetId: 1,
+            sheetId: summarySheetId,
             startRowIndex: 13,
             endRowIndex: 13 + Object.keys(inventory.categoryCounts).length,
             startColumnIndex: 2,
@@ -413,22 +565,21 @@ export class GoogleSheetsService {
           fields: 'userEnteredFormat(numberFormat,horizontalAlignment)',
         },
       },
-      // Auto-resize dimensions for Inventory Details (columns 0-8)
+      // Auto-resize dimensions
       {
         autoResizeDimensions: {
           dimensions: {
-            sheetId: 0,
+            sheetId: detailsSheetId,
             dimension: 'COLUMNS',
             startIndex: 0,
             endIndex: 9,
           },
         },
       },
-      // Auto-resize dimensions for Executive Summary (columns 0-3)
       {
         autoResizeDimensions: {
           dimensions: {
-            sheetId: 1,
+            sheetId: summarySheetId,
             dimension: 'COLUMNS',
             startIndex: 0,
             endIndex: 3,
@@ -447,54 +598,24 @@ export class GoogleSheetsService {
         body: JSON.stringify({ requests: formatRequests }),
       });
     } catch (fmtErr) {
-      console.warn('[GoogleSheets] Formatting update failed (non-critical):', fmtErr);
+      console.warn('[GoogleSheets] Formatting update error (non-critical):', fmtErr);
     }
 
-    // 4. Grant access via Google Drive API
-    // 4a. Public read access with link (allows instant 1-click viewing in browser)
+    // 6. Ensure read access via Google Drive API
     try {
-      const permRes = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${spreadsheetId}/permissions`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            role: 'reader',
-            type: 'anyone',
-          }),
-        }
-      );
-      if (!permRes.ok) {
-        console.warn('[GoogleSheets] Drive permission set failed:', await permRes.text());
-      }
-    } catch (permErr) {
-      console.warn('[GoogleSheets] Drive permission exception:', permErr);
-    }
-
-    // 4b. If user email is present, grant writer access
-    if (options?.userEmail && options.userEmail.includes('@')) {
-      try {
-        await fetch(
-          `https://www.googleapis.com/drive/v3/files/${spreadsheetId}/permissions?sendNotificationEmail=false`,
-          {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              role: 'writer',
-              type: 'user',
-              emailAddress: options.userEmail,
-            }),
-          }
-        );
-      } catch {
-        // Ignore user permission grant failure (public read link already works)
-      }
+      await fetch(`https://www.googleapis.com/drive/v3/files/${spreadsheetId}/permissions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          role: 'reader',
+          type: 'anyone',
+        }),
+      });
+    } catch {
+      // Non-critical if permissions can't be set
     }
 
     return {
@@ -503,6 +624,7 @@ export class GoogleSheetsService {
       totalListings: inventory.totalCount,
       totalValue: inventory.totalValue,
       sheetTitle,
+      isExistingSheet,
     };
   }
 }
