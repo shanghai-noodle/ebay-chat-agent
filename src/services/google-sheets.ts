@@ -1,5 +1,5 @@
 import { GoogleChatMediaService, ServiceAccountCredentials } from './google-chat/media';
-import { SellerInventorySummary } from './ebay/trading';
+import { ActiveListingItem, SellerInventorySummary } from './ebay/trading';
 
 export class GoogleSheetsApiDisabledError extends Error {
   public activationUrl: string;
@@ -33,6 +33,16 @@ export interface ItemCmaEntry {
   competitiveness?: string;
   strategyNotes?: string;
   itemDescription?: string;
+  suggestedPrice?: number;
+}
+
+export interface SheetLayoutConfig {
+  columnOrder?: string[];
+  moveColumns?: Array<{ column: string; toPosition: string | number }>;
+  columnsToAdd?: Array<{ column?: string; id?: string; title?: string; position?: string | number }>;
+  columnsToRemove?: string[];
+  colorCodeColumns?: string[];
+  rowHeight?: number;
 }
 
 export interface CreateReportOptions {
@@ -41,6 +51,7 @@ export interface CreateReportOptions {
   spreadsheetId?: string;
   clearExisting?: boolean;
   cmaData?: Record<string, ItemCmaEntry> | ItemCmaEntry[];
+  layout?: SheetLayoutConfig;
 }
 
 export interface SpreadsheetReportResult {
@@ -50,6 +61,372 @@ export interface SpreadsheetReportResult {
   totalValue: number;
   sheetTitle: string;
   isExistingSheet?: boolean;
+  columns?: string[];
+}
+
+export interface SheetRowContext {
+  rowNum: number;
+  cma?: ItemCmaEntry;
+  cmaMap: Map<string, ItemCmaEntry>;
+  colLetters: Record<string, string>;
+  primarySheetTitle: string;
+  summarySheetTitle: string;
+}
+
+export interface SheetColumnDef {
+  id: string;
+  title: string;
+  aliases: string[];
+  width: number;
+  align?: 'LEFT' | 'CENTER' | 'RIGHT';
+  valign?: 'TOP' | 'MIDDLE' | 'BOTTOM';
+  bold?: boolean;
+  wrap?: boolean;
+  numberFormat?: { type: string; pattern: string };
+  getValue: (item: ActiveListingItem, index: number, ctx: SheetRowContext) => any;
+}
+
+export function getColumnLetter(colIndex: number): string {
+  let letter = '';
+  let temp = colIndex;
+  while (temp >= 0) {
+    letter = String.fromCharCode((temp % 26) + 65) + letter;
+    temp = Math.floor(temp / 26) - 1;
+  }
+  return letter;
+}
+
+export function computeSuggestedPrice(price: number, cma?: ItemCmaEntry): number {
+  if (!cma) return price;
+  if (cma.suggestedPrice && typeof cma.suggestedPrice === 'number') return cma.suggestedPrice;
+  const comp = cma.competitiveness || '';
+  const sold = cma.soldAvg || price * 0.95;
+  const low = cma.activeLow || price * 0.85;
+
+  let suggested = price;
+  if (comp.includes('Premium') || comp.includes('Rare')) {
+    suggested = price;
+  } else if (comp.includes('Above Market') || comp.includes('Overpriced') || comp.includes('High Ask')) {
+    const target = Math.max(low, sold * 1.1);
+    suggested = Math.round(Math.min(price * 0.88, target) * 100) / 100;
+  } else if (comp.includes('Below Market') || comp.includes('Fast Mover')) {
+    suggested = Math.round(Math.max(price, sold) * 100) / 100;
+  } else {
+    if (price > sold * 1.15) {
+      suggested = Math.round(sold * 1.08 * 100) / 100;
+    } else {
+      suggested = price;
+    }
+  }
+  return Math.round(suggested * 100) / 100;
+}
+
+function findColumnDef(columns: SheetColumnDef[], token: string): SheetColumnDef | undefined {
+  const norm = token.toLowerCase().trim().replace(/['"]/g, '');
+  return columns.find(
+    (c) =>
+      c.id.toLowerCase() === norm ||
+      c.title.toLowerCase() === norm ||
+      c.aliases.some((a) => norm.includes(a) || a.includes(norm))
+  );
+}
+
+function getAvailableColumns(): SheetColumnDef[] {
+  return [
+    {
+      id: 'listingUrl',
+      title: 'eBay Listing Link',
+      aliases: ['listing url', 'item link', 'ebay link', 'url', 'link', 'ebay listing url'],
+      width: 220,
+      align: 'CENTER',
+      valign: 'MIDDLE',
+      getValue: (item) => item.listingUrl || `https://www.ebay.com/itm/${item.itemId}`,
+    },
+    {
+      id: 'thumbnail',
+      title: 'Thumbnail',
+      aliases: ['thumbnail', 'item thumbnail', 'image', 'photo', 'picture'],
+      width: 85,
+      align: 'CENTER',
+      valign: 'MIDDLE',
+      getValue: (item) => (item.imageUrl ? `=IMAGE("${item.imageUrl}")` : ''),
+    },
+    {
+      id: 'itemId',
+      title: 'Item ID',
+      aliases: ['item id', 'id', 'item_id'],
+      width: 125,
+      align: 'CENTER',
+      valign: 'MIDDLE',
+      getValue: (item) => item.itemId,
+    },
+    {
+      id: 'title',
+      title: 'Listing Title',
+      aliases: ['listing title', 'title', 'name'],
+      width: 320,
+      align: 'LEFT',
+      valign: 'MIDDLE',
+      getValue: (item) => item.title,
+    },
+    {
+      id: 'category',
+      title: 'Category Group',
+      aliases: ['category group', 'category'],
+      width: 160,
+      align: 'LEFT',
+      valign: 'MIDDLE',
+      getValue: (item) => item.categoryGroup || 'Transformers',
+    },
+    {
+      id: 'condition',
+      title: 'Condition & Packaging',
+      aliases: ['condition & packaging', 'condition', 'packaging'],
+      width: 180,
+      align: 'CENTER',
+      valign: 'MIDDLE',
+      getValue: (item) => item.condition || 'Factory Sealed (MISB / NIB)',
+    },
+    {
+      id: 'listedPrice',
+      title: 'Listed Price (USD)',
+      aliases: ['listed price', 'price', 'retail price'],
+      width: 130,
+      align: 'RIGHT',
+      valign: 'MIDDLE',
+      numberFormat: { type: 'CURRENCY', pattern: '"$"#,##0.00' },
+      getValue: (item) => item.price,
+    },
+    {
+      id: 'activeLow',
+      title: 'Active Low (USD)',
+      aliases: ['active low', 'low price', 'low comp'],
+      width: 130,
+      align: 'RIGHT',
+      valign: 'MIDDLE',
+      numberFormat: { type: 'CURRENCY', pattern: '"$"#,##0.00' },
+      getValue: (item, _i, ctx) => ctx.cma?.activeLow ?? Math.round(item.price * 0.85),
+    },
+    {
+      id: 'activeHigh',
+      title: 'Active High (USD)',
+      aliases: ['active high', 'high price', 'high comp'],
+      width: 130,
+      align: 'RIGHT',
+      valign: 'MIDDLE',
+      numberFormat: { type: 'CURRENCY', pattern: '"$"#,##0.00' },
+      getValue: (item, _i, ctx) => ctx.cma?.activeHigh ?? Math.round(item.price * 1.25),
+    },
+    {
+      id: 'soldAvg',
+      title: 'Recent Sold Avg (USD)',
+      aliases: ['recent sold avg', 'sold avg', 'sold comp', 'comps average'],
+      width: 140,
+      align: 'RIGHT',
+      valign: 'MIDDLE',
+      numberFormat: { type: 'CURRENCY', pattern: '"$"#,##0.00' },
+      getValue: (item, _i, ctx) => ctx.cma?.soldAvg ?? Math.round(item.price * 0.95),
+    },
+    {
+      id: 'compsVariance',
+      title: 'Price vs Sold Comps (%)',
+      aliases: ['price vs sold comps', 'variance', 'comps variance'],
+      width: 150,
+      align: 'RIGHT',
+      valign: 'MIDDLE',
+      numberFormat: { type: 'PERCENT', pattern: '+0.0%;-0.0%;0.0%' },
+      getValue: (_item, _i, ctx) => {
+        const lp = ctx.colLetters['listedPrice'];
+        const sa = ctx.colLetters['soldAvg'];
+        if (lp && sa) return `=( ${lp}${ctx.rowNum}-${sa}${ctx.rowNum} )/${sa}${ctx.rowNum}`;
+        return 0;
+      },
+    },
+    {
+      id: 'competitiveness',
+      title: 'Competitiveness Rating',
+      aliases: ['competitiveness rating', 'competitiveness', 'rating'],
+      width: 175,
+      align: 'CENTER',
+      valign: 'MIDDLE',
+      bold: true,
+      getValue: (item, _i, ctx) => ctx.cma?.competitiveness || 'Fair Market Value',
+    },
+    {
+      id: 'suggestedPrice',
+      title: 'Gemini Suggested Price (USD)',
+      aliases: ['gemini suggested price', 'suggested price', 'recommended price'],
+      width: 160,
+      align: 'RIGHT',
+      valign: 'MIDDLE',
+      bold: true,
+      numberFormat: { type: 'CURRENCY', pattern: '"$"#,##0.00' },
+      getValue: (item, _i, ctx) => computeSuggestedPrice(item.price, ctx.cma),
+    },
+    {
+      id: 'suggestedAdjustment',
+      title: 'Gemini Suggested Price Adjustment (USD)',
+      aliases: ['gemini suggested price adjustment', 'suggested price adjustment', 'price adjustment', 'adjustment'],
+      width: 185,
+      align: 'RIGHT',
+      valign: 'MIDDLE',
+      bold: true,
+      numberFormat: { type: 'CURRENCY', pattern: '+$#,##0.00;-$#,##0.00;"$0.00"' },
+      getValue: (item, _i, ctx) => {
+        const sp = ctx.colLetters['suggestedPrice'];
+        const lp = ctx.colLetters['listedPrice'];
+        if (sp && lp) return `=${sp}${ctx.rowNum}-${lp}${ctx.rowNum}`;
+        const s = computeSuggestedPrice(item.price, ctx.cma);
+        return Math.round((s - item.price) * 100) / 100;
+      },
+    },
+    {
+      id: 'strategyNotes',
+      title: 'Market Strategy & Valuation Notes',
+      aliases: ['market strategy & valuation notes', 'strategy notes', 'valuation notes'],
+      width: 380,
+      align: 'LEFT',
+      valign: 'MIDDLE',
+      wrap: true,
+      getValue: (item, _i, ctx) => ctx.cma?.strategyNotes || 'Standard collector item with stable market demand.',
+    },
+    {
+      id: 'itemDescription',
+      title: 'Full Item Description',
+      aliases: ['full item description', 'item description', 'description'],
+      width: 420,
+      align: 'LEFT',
+      valign: 'MIDDLE',
+      wrap: true,
+      getValue: (item, _i, ctx) => ctx.cma?.itemDescription || item.title,
+    },
+    {
+      id: 'quantity',
+      title: 'Quantity Available',
+      aliases: ['quantity', 'qty', 'stock'],
+      width: 100,
+      align: 'CENTER',
+      valign: 'MIDDLE',
+      getValue: (item) => item.quantity || 1,
+    },
+    {
+      id: 'totalValue',
+      title: 'Total Value (USD)',
+      aliases: ['total value', 'inventory value'],
+      width: 140,
+      align: 'RIGHT',
+      valign: 'MIDDLE',
+      numberFormat: { type: 'CURRENCY', pattern: '"$"#,##0.00' },
+      getValue: (item, _i, ctx) => {
+        const lp = ctx.colLetters['listedPrice'];
+        const q = ctx.colLetters['quantity'];
+        if (lp && q) return `=${lp}${ctx.rowNum}*${q}${ctx.rowNum}`;
+        return item.price * (item.quantity || 1);
+      },
+    },
+    {
+      id: 'photosCount',
+      title: 'Photos Count',
+      aliases: ['photos count', 'photos', 'images'],
+      width: 100,
+      align: 'CENTER',
+      valign: 'MIDDLE',
+      getValue: (item) => item.photosCount || 1,
+    },
+  ];
+}
+
+function resolveColumnList(
+  availableColumns: SheetColumnDef[],
+  defaultIds: string[],
+  layout?: SheetLayoutConfig
+): SheetColumnDef[] {
+  let activeIds = [...defaultIds];
+
+  if (layout?.columnOrder && layout.columnOrder.length > 0) {
+    const customOrderedIds: string[] = [];
+    for (const token of layout.columnOrder) {
+      const match = findColumnDef(availableColumns, token);
+      if (match && !customOrderedIds.includes(match.id)) {
+        customOrderedIds.push(match.id);
+      }
+    }
+    if (customOrderedIds.length > 0) {
+      activeIds = customOrderedIds;
+    }
+  }
+
+  // Handle moveColumns
+  if (layout?.moveColumns && Array.isArray(layout.moveColumns)) {
+    for (const move of layout.moveColumns) {
+      const match = findColumnDef(availableColumns, move.column);
+      if (match) {
+        activeIds = activeIds.filter((id) => id !== match.id);
+        const targetPos = String(move.toPosition).toLowerCase();
+        if (targetPos === 'first' || targetPos === '0' || targetPos === '1') {
+          activeIds.unshift(match.id);
+        } else if (targetPos === 'second' || targetPos === '2') {
+          activeIds.splice(1, 0, match.id);
+        } else if (targetPos === 'last') {
+          activeIds.push(match.id);
+        } else {
+          const num = parseInt(targetPos, 10);
+          const idx = isNaN(num) ? 0 : Math.max(0, num - 1);
+          activeIds.splice(idx, 0, match.id);
+        }
+      }
+    }
+  }
+
+  // Handle columnsToAdd
+  if (layout?.columnsToAdd && Array.isArray(layout.columnsToAdd)) {
+    for (const add of layout.columnsToAdd) {
+      const colName = add.column || add.title || add.id || '';
+      const match = findColumnDef(availableColumns, colName);
+      const colId = match ? match.id : 'custom_' + colName.toLowerCase().replace(/[^a-z0-9]/g, '_');
+
+      if (!match) {
+        availableColumns.push({
+          id: colId,
+          title: colName,
+          aliases: [colName.toLowerCase()],
+          width: 180,
+          align: 'LEFT',
+          valign: 'MIDDLE',
+          wrap: true,
+          getValue: () => '',
+        });
+      }
+
+      activeIds = activeIds.filter((id) => id !== colId);
+      const pos = String(add.position || 'last').toLowerCase();
+      if (pos === 'first' || pos === '0' || pos === '1') {
+        activeIds.unshift(colId);
+      } else if (pos === 'second' || pos === '2') {
+        activeIds.splice(1, 0, colId);
+      } else if (pos === 'last') {
+        activeIds.push(colId);
+      } else {
+        const num = parseInt(pos, 10);
+        const idx = isNaN(num) ? activeIds.length : Math.max(0, num - 1);
+        activeIds.splice(idx, 0, colId);
+      }
+    }
+  }
+
+  // Handle columnsToRemove
+  if (layout?.columnsToRemove && Array.isArray(layout.columnsToRemove)) {
+    for (const rem of layout.columnsToRemove) {
+      const match = findColumnDef(availableColumns, rem);
+      if (match) {
+        activeIds = activeIds.filter((id) => id !== match.id);
+      }
+    }
+  }
+
+  return activeIds
+    .map((id) => availableColumns.find((c) => c.id === id))
+    .filter((c): c is SheetColumnDef => Boolean(c));
 }
 
 export class GoogleSheetsService {
@@ -80,6 +457,7 @@ export class GoogleSheetsService {
    * 1. Writing directly to a provided spreadsheetId.
    * 2. Auto-discovering any Google Sheet shared with the service account.
    * 3. Creating a new spreadsheet (if Drive quota allows, e.g. in a Shared Drive).
+   * 4. Dynamic column reordering, custom columns, thumbnails, and color-coded conditional formatting.
    */
   async createInventorySpreadsheet(
     inventory: SellerInventorySummary,
@@ -93,6 +471,7 @@ export class GoogleSheetsService {
       month: 'short',
       day: 'numeric',
     });
+
     const cmaMap = new Map<string, ItemCmaEntry>();
     if (Array.isArray(options?.cmaData)) {
       for (const item of options.cmaData) {
@@ -110,7 +489,42 @@ export class GoogleSheetsService {
       options?.title || `eBay ${hasCma ? 'Market Research' : 'Inventory'} Report - ly014132 (${formattedDate})`;
     const items = inventory.items || [];
     const rowCount = Math.max(100, items.length + 15);
-    const colCount = hasCma ? 15 : 10;
+
+    // Resolve dynamic active columns
+    const availableColumns = getAvailableColumns();
+    const defaultBaseline = hasCma
+      ? [
+          'listingUrl',
+          'thumbnail',
+          'itemId',
+          'title',
+          'category',
+          'condition',
+          'listedPrice',
+          'activeLow',
+          'activeHigh',
+          'soldAvg',
+          'compsVariance',
+          'competitiveness',
+          'suggestedPrice',
+          'suggestedAdjustment',
+          'strategyNotes',
+          'itemDescription',
+        ]
+      : [
+          'itemId',
+          'title',
+          'category',
+          'condition',
+          'listedPrice',
+          'quantity',
+          'totalValue',
+          'photosCount',
+          'listingUrl',
+        ];
+
+    const activeColumns = resolveColumnList(availableColumns, defaultBaseline, options?.layout);
+    const colCount = Math.max(activeColumns.length, 16);
 
     let spreadsheetId = options?.spreadsheetId;
     let isExistingSheet = false;
@@ -183,7 +597,6 @@ export class GoogleSheetsService {
         const errMsg = errJson?.error?.message || (await createRes.text().catch(() => 'Unknown error'));
         const status = errJson?.error?.status || '';
 
-        // Case A: Google Sheets API is disabled on GCP
         if (createRes.status === 403 && (errMsg.includes('SERVICE_DISABLED') || errMsg.includes('has not been used'))) {
           let activationUrl = '';
           if (Array.isArray(errJson?.error?.details)) {
@@ -192,19 +605,11 @@ export class GoogleSheetsService {
                 activationUrl = d.metadata.activationUrl;
                 break;
               }
-              if (Array.isArray(d.links)) {
-                const helpLink = d.links.find((l: any) => l.url?.includes('overview'));
-                if (helpLink) {
-                  activationUrl = helpLink.url;
-                  break;
-                }
-              }
             }
           }
           throw new GoogleSheetsApiDisabledError(errMsg, activationUrl);
         }
 
-        // Case B: Google Service Account has 0-byte Drive storage quota (standard Google Cloud behavior)
         if (
           createRes.status === 403 ||
           errMsg.includes('The caller does not have permission') ||
@@ -239,7 +644,7 @@ export class GoogleSheetsService {
 
         const foundCma = existingSheets.find((s) => s.properties?.title === 'Market Research & CMA');
         const foundDetails = existingSheets.find((s) => s.properties?.title === 'Inventory Details');
-        const primarySheet = hasCma ? (foundCma || foundDetails) : (foundDetails || foundCma);
+        const primarySheet = hasCma ? foundCma || foundDetails : foundDetails || foundCma;
         const foundSummary = existingSheets.find((s) => s.properties?.title === 'Executive Summary');
 
         const setupRequests: any[] = [];
@@ -329,7 +734,7 @@ export class GoogleSheetsService {
       console.warn('[GoogleSheets] Metadata inspection error (falling back to defaults):', metaErr);
     }
 
-    // Optional: Clear existing content if requested
+    // 4. Clear existing content if requested
     if (options?.clearExisting) {
       try {
         await Promise.all([
@@ -353,153 +758,105 @@ export class GoogleSheetsService {
       }
     }
 
-    // 4. Populate values across both worksheets
+    // 5. Populate values dynamically across both worksheets
     const nowPacific = new Date().toLocaleString('en-US', {
       timeZone: 'America/Los_Angeles',
       dateStyle: 'medium',
       timeStyle: 'short',
     });
 
-    let detailHeaders: string[];
-    let detailRows: (string | number)[][];
-    let summaryData: (string | number)[][];
+    const colLetters: Record<string, string> = {};
+    activeColumns.forEach((col, idx) => {
+      colLetters[col.id] = getColumnLetter(idx);
+    });
 
-    if (hasCma) {
-      detailHeaders = [
-        'Item ID',
-        'Listing Title',
-        'Category Group',
-        'Condition & Packaging',
-        'Listed Price (USD)',
-        'Active Low (USD)',
-        'Active High (USD)',
-        'Recent Sold Avg (USD)',
-        'Price vs Sold Comps (%)',
-        'Competitiveness Rating',
-        'Market Strategy & Valuation Notes',
-        'Full Item Description',
-        'eBay Listing URL',
-      ];
+    const detailHeaders = activeColumns.map((col) => col.title);
+    const detailRows = items.map((item, index) => {
+      const rowNum = index + 2;
+      const cma = cmaMap.get(item.itemId);
+      const ctx: SheetRowContext = {
+        rowNum,
+        cma,
+        cmaMap,
+        colLetters,
+        primarySheetTitle,
+        summarySheetTitle: 'Executive Summary',
+      };
+      return activeColumns.map((col) => col.getValue(item, index, ctx));
+    });
 
-      detailRows = items.map((item, index) => {
-        const rowNum = index + 2;
-        const cma = cmaMap.get(item.itemId);
-        const price = item.price;
-        const activeLow = cma?.activeLow ?? Math.round(price * 0.85);
-        const activeHigh = cma?.activeHigh ?? Math.round(price * 1.25);
-        const soldAvg = cma?.soldAvg ?? Math.round(price * 0.95);
-        const comp = cma?.competitiveness || 'Fair Market Value';
-        const notes = cma?.strategyNotes || 'Standard collector item with stable market demand.';
-        const desc = cma?.itemDescription || item.title;
+    const lpCol = colLetters['listedPrice'] || 'G';
+    const saCol = colLetters['soldAvg'] || 'J';
+    const spCol = colLetters['suggestedPrice'] || lpCol;
+    const compCol = colLetters['competitiveness'] || 'L';
+    const idCol = colLetters['itemId'] || 'C';
 
-        return [
-          item.itemId,
-          item.title,
-          item.categoryGroup || 'Transformers',
-          item.condition || 'Factory Sealed (MISB / NIB)',
-          price,
-          activeLow,
-          activeHigh,
-          soldAvg,
-          `=(E${rowNum}-H${rowNum})/H${rowNum}`,
-          comp,
-          notes,
-          desc,
-          item.listingUrl || `https://www.ebay.com/itm/${item.itemId}`,
+    const summaryData: (string | number)[][] = hasCma
+      ? [
+          ['📊 EXECUTIVE COMPARATIVE MARKET ANALYSIS (CMA)', '', ''],
+          ['Key Metric', 'Value', 'Strategic Context & Notes'],
+          ['Total Active Listings Analyzed', `=COUNTA('${primarySheetTitle}'!${idCol}2:${idCol})`, '100% of current active eBay catalog'],
+          ['Total Portfolio Listed Value', `=SUM('${primarySheetTitle}'!${lpCol}2:${lpCol})`, 'Cumulative asking price on eBay'],
+          ['Total Estimated Sold Market Value', `=SUM('${primarySheetTitle}'!${saCol}2:${saCol})`, 'Benchmark valuation based on recent comps'],
+          ['Total Gemini Suggested Portfolio Value', `=SUM('${primarySheetTitle}'!${spCol}2:${spCol})`, 'Optimized target valuation across all listings'],
+          ['Portfolio Variance vs Market Comps', '=(B4-B5)/B5', 'Positive indicates premium positioning over sold comps'],
+          ['Average Listed Price', `=AVERAGE('${primarySheetTitle}'!${lpCol}2:${lpCol})`, 'Current mean asking price per item'],
+          ['Average Sold Comp', `=AVERAGE('${primarySheetTitle}'!${saCol}2:${saCol})`, 'Market average realized price per item'],
+          ['Average Gemini Suggested Price', `=AVERAGE('${primarySheetTitle}'!${spCol}2:${spCol})`, 'Recommended optimal price per item'],
+          [
+            'Top Asset by Listed Price',
+            inventory.topValuable[0]
+              ? `${inventory.topValuable[0].title} ($${inventory.topValuable[0].price.toFixed(2)})`
+              : 'N/A',
+            'Highest asking item in portfolio',
+          ],
+          ['Report Generated At', `${nowPacific} (Pacific)`, 'Live Gemini Market Intelligence snapshot'],
+          ['Store Owner', 'ly014132', 'Authentic California Collectibles & Die-Cast'],
+          ['Storefront Showcase', 'https://bluestonelab.trade', 'Direct showcase custom storefront'],
+          ['eBay Official Store', 'https://www.ebay.com/usr/ly014132', 'Direct seller storefront on eBay'],
+          ['', '', ''],
+          ['Pricing Competitiveness Breakdown', 'Item Count', '% of Portfolio'],
+          ['Fair Market Value', `=COUNTIF('${primarySheetTitle}'!${compCol}2:${compCol}, "Fair Market Value")`, '=B18/B3'],
+          [
+            'Premium / Rare',
+            `=COUNTIF('${primarySheetTitle}'!${compCol}2:${compCol}, "Premium / Rare*") + COUNTIF('${primarySheetTitle}'!${compCol}2:${compCol}, "Premium*")`,
+            '=B19/B3',
+          ],
+          ['Below Market - Fast Mover', `=COUNTIF('${primarySheetTitle}'!${compCol}2:${compCol}, "Below Market*")`, '=B20/B3'],
+          [
+            'Above Market / High Ask',
+            `=COUNTIF('${primarySheetTitle}'!${compCol}2:${compCol}, "Above Market*") + COUNTIF('${primarySheetTitle}'!${compCol}2:${compCol}, "Overpriced*")`,
+            '=B21/B3',
+          ],
+        ]
+      : [
+          ['📊 EXECUTIVE PORTFOLIO SUMMARY', '', ''],
+          ['KPI Metric', 'Value', 'Context / Notes'],
+          ['Total Active Listings', `=COUNTA('${primarySheetTitle}'!${idCol}2:${idCol})`, 'Unique active eBay listings'],
+          ['Total Portfolio Retail Value', `=SUM('${primarySheetTitle}'!${colLetters['totalValue'] || 'G'}2:${colLetters['totalValue'] || 'G'})`, 'Cumulative asking price across inventory'],
+          ['Average Listing Price', `=AVERAGE('${primarySheetTitle}'!${lpCol}2:${lpCol})`, 'Mean asking price per active item'],
+          ['Total Units Available', `=SUM('${primarySheetTitle}'!${colLetters['quantity'] || 'F'}2:${colLetters['quantity'] || 'F'})`, 'Sum of all physical items in stock'],
+          [
+            'Top Valued Item',
+            inventory.topValuable[0]
+              ? `${inventory.topValuable[0].title} ($${inventory.topValuable[0].price.toFixed(2)})`
+              : 'N/A',
+            'Highest asking item in portfolio',
+          ],
+          ['Report Generated At', `${nowPacific} (Pacific)`, 'Live snapshot synced with eBay'],
+          ['Store Owner', 'ly014132', 'Authentic California Collectibles'],
+          ['Storefront Showcase', 'https://bluestonelab.trade', 'Custom online showcase storefront'],
+          ['eBay Official Store', 'https://www.ebay.com/usr/ly014132', 'Direct eBay seller portal'],
+          ['', '', ''],
+          ['Category Collections Breakdown', 'Item Count', '% of Portfolio'],
+          ...Object.entries(inventory.categoryCounts).map(([cat, count]) => [
+            cat,
+            count,
+            `=${count}/${inventory.totalCount || 1}`,
+          ]),
         ];
-      });
 
-      summaryData = [
-        ['📊 EXECUTIVE COMPARATIVE MARKET ANALYSIS (CMA)', '', ''],
-        ['Key Metric', 'Value', 'Strategic Context & Notes'],
-        ['Total Active Listings Analyzed', `=COUNTA('${primarySheetTitle}'!A2:A)`, '100% of current active eBay catalog'],
-        ['Total Portfolio Listed Value', `=SUM('${primarySheetTitle}'!E2:E)`, 'Cumulative asking price on eBay'],
-        ['Total Estimated Sold Market Value', `=SUM('${primarySheetTitle}'!H2:H)`, 'Benchmark valuation based on recent comps'],
-        ['Portfolio Variance vs Market Comps', '=(B4-B5)/B5', 'Positive indicates premium positioning over sold comps'],
-        ['Average Listed Price', `=AVERAGE('${primarySheetTitle}'!E2:E)`, 'Current mean asking price per item'],
-        ['Average Sold Comp', `=AVERAGE('${primarySheetTitle}'!H2:H)`, 'Market average realized price per item'],
-        [
-          'Top Asset by Listed Price',
-          inventory.topValuable[0]
-            ? `${inventory.topValuable[0].title} ($${inventory.topValuable[0].price.toFixed(2)})`
-            : 'N/A',
-          'Highest asking item in portfolio',
-        ],
-        ['Report Generated At', `${nowPacific} (Pacific)`, 'Live Gemini Market Intelligence snapshot'],
-        ['Store Owner', 'ly014132', 'Authentic California Collectibles & Die-Cast'],
-        ['Storefront Showcase', 'https://bluestonelab.trade', 'Direct showcase custom storefront'],
-        ['eBay Official Store', 'https://www.ebay.com/usr/ly014132', 'Direct seller storefront on eBay'],
-        ['', '', ''],
-        ['Pricing Competitiveness Breakdown', 'Item Count', '% of Portfolio'],
-        ['Fair Market Value', `=COUNTIF('${primarySheetTitle}'!J2:J, "Fair Market Value")`, '=B16/B3'],
-        [
-          'Premium / Rare',
-          `=COUNTIF('${primarySheetTitle}'!J2:J, "Premium / Rare*") + COUNTIF('${primarySheetTitle}'!J2:J, "Premium*")`,
-          '=B17/B3',
-        ],
-        ['Below Market - Fast Mover', `=COUNTIF('${primarySheetTitle}'!J2:J, "Below Market*")`, '=B18/B3'],
-        [
-          'Above Market / High Ask',
-          `=COUNTIF('${primarySheetTitle}'!J2:J, "Above Market*") + COUNTIF('${primarySheetTitle}'!J2:J, "Overpriced*")`,
-          '=B19/B3',
-        ],
-      ];
-    } else {
-      detailHeaders = [
-        'Item ID',
-        'Title',
-        'Category Group',
-        'Condition',
-        'Price (USD)',
-        'Qty',
-        'Total Value (USD)',
-        'Photos',
-        'eBay Listing URL',
-      ];
-
-      detailRows = items.map((item, index) => {
-        const rowNum = index + 2;
-        return [
-          item.itemId,
-          item.title,
-          item.categoryGroup || 'General',
-          item.condition || 'MISB',
-          item.price,
-          item.quantity || 1,
-          `=E${rowNum}*F${rowNum}`,
-          item.photosCount || 1,
-          item.listingUrl,
-        ];
-      });
-
-      summaryData = [
-        ['📊 EXECUTIVE PORTFOLIO SUMMARY', '', ''],
-        ['KPI Metric', 'Value', 'Context / Notes'],
-        ['Total Active Listings', `=COUNTA('${primarySheetTitle}'!A2:A)`, 'Unique active eBay listings'],
-        ['Total Portfolio Retail Value', `=SUM('${primarySheetTitle}'!G2:G)`, 'Cumulative asking price across inventory'],
-        ['Average Listing Price', `=AVERAGE('${primarySheetTitle}'!E2:E)`, 'Mean asking price per active item'],
-        ['Total Units Available', `=SUM('${primarySheetTitle}'!F2:F)`, 'Sum of all physical items in stock'],
-        [
-          'Top Valued Item',
-          inventory.topValuable[0]
-            ? `${inventory.topValuable[0].title} ($${inventory.topValuable[0].price.toFixed(2)})`
-            : 'N/A',
-          'Highest listing price in inventory',
-        ],
-        ['Report Generated At', `${nowPacific} (Pacific)`, 'Live snapshot synced with eBay'],
-        ['Store Owner', 'ly014132', 'Authentic California Collectibles'],
-        ['Storefront Showcase', 'https://bluestonelab.trade', 'Custom online showcase storefront'],
-        ['eBay Official Store', 'https://www.ebay.com/usr/ly014132', 'Direct eBay seller portal'],
-        ['', '', ''],
-        ['Category Collections Breakdown', 'Item Count', '% of Portfolio'],
-        ...Object.entries(inventory.categoryCounts).map(([cat, count]) => [
-          cat,
-          count,
-          `=${count}/${inventory.totalCount || 1}`,
-        ]),
-      ];
-    }
-
+    const lastColLetter = getColumnLetter(activeColumns.length - 1);
     const valuesUpdateRes = await fetch(
       `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchUpdate`,
       {
@@ -512,7 +869,7 @@ export class GoogleSheetsService {
           valueInputOption: 'USER_ENTERED',
           data: [
             {
-              range: `'${primarySheetTitle}'!A1:${hasCma ? 'M' : 'I'}`,
+              range: `'${primarySheetTitle}'!A1:${lastColLetter}`,
               values: [detailHeaders, ...detailRows],
             },
             {
@@ -528,507 +885,308 @@ export class GoogleSheetsService {
       console.warn('[GoogleSheets] Failed to populate values:', await valuesUpdateRes.text());
     }
 
-    // 5. Apply professional styles, formatting, and auto-fit column widths
-    const formatRequests: any[] = hasCma
-      ? [
-          // Header for Market Research & CMA (Dark Navy)
-          {
-            repeatCell: {
-              range: {
-                sheetId: detailsSheetId,
-                startRowIndex: 0,
-                endRowIndex: 1,
-                startColumnIndex: 0,
-                endColumnIndex: 13,
-              },
-              cell: {
-                userEnteredFormat: {
-                  backgroundColor: { red: 0.1, green: 0.14, blue: 0.22 },
-                  textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 }, bold: true, fontSize: 10 },
-                  horizontalAlignment: 'CENTER',
-                  verticalAlignment: 'MIDDLE',
+    // 6. Apply dynamic professional styles, formatting, column widths, row heights, and conditional formatting
+    const formatRequests: any[] = [
+      // Header for primary sheet (Dark Navy)
+      {
+        repeatCell: {
+          range: {
+            sheetId: detailsSheetId,
+            startRowIndex: 0,
+            endRowIndex: 1,
+            startColumnIndex: 0,
+            endColumnIndex: activeColumns.length,
+          },
+          cell: {
+            userEnteredFormat: {
+              backgroundColor: { red: 0.1, green: 0.14, blue: 0.22 },
+              textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 }, bold: true, fontSize: 10 },
+              horizontalAlignment: 'CENTER',
+              verticalAlignment: 'MIDDLE',
+            },
+          },
+          fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
+        },
+      },
+    ];
+
+    // If thumbnail column is included, set comfortable row heights
+    const hasThumbnail = activeColumns.some((c) => c.id === 'thumbnail');
+    if (hasThumbnail || options?.layout?.rowHeight) {
+      const rowHeight = options?.layout?.rowHeight || 56;
+      formatRequests.push({
+        updateDimensionProperties: {
+          range: {
+            sheetId: detailsSheetId,
+            dimension: 'ROWS',
+            startIndex: 1,
+            endIndex: items.length + 1,
+          },
+          properties: { pixelSize: rowHeight },
+          fields: 'pixelSize',
+        },
+      });
+    }
+
+    // Format each active column
+    activeColumns.forEach((col, idx) => {
+      // Column width
+      formatRequests.push({
+        updateDimensionProperties: {
+          range: {
+            sheetId: detailsSheetId,
+            dimension: 'COLUMNS',
+            startIndex: idx,
+            endIndex: idx + 1,
+          },
+          properties: { pixelSize: col.width },
+          fields: 'pixelSize',
+        },
+      });
+
+      const userFormat: any = {};
+      const fields: string[] = [];
+
+      if (col.align) {
+        userFormat.horizontalAlignment = col.align;
+        fields.push('horizontalAlignment');
+      }
+      if (col.valign) {
+        userFormat.verticalAlignment = col.valign;
+        fields.push('verticalAlignment');
+      }
+      if (col.bold) {
+        userFormat.textFormat = { bold: true };
+        fields.push('textFormat');
+      }
+      if (col.wrap) {
+        userFormat.wrapStrategy = 'WRAP';
+        fields.push('wrapStrategy');
+      }
+      if (col.numberFormat) {
+        userFormat.numberFormat = col.numberFormat;
+        fields.push('numberFormat');
+      }
+
+      if (fields.length > 0) {
+        formatRequests.push({
+          repeatCell: {
+            range: {
+              sheetId: detailsSheetId,
+              startRowIndex: 1,
+              endRowIndex: items.length + 1,
+              startColumnIndex: idx,
+              endColumnIndex: idx + 1,
+            },
+            cell: { userEnteredFormat: userFormat },
+            fields: `userEnteredFormat(${fields.join(',')})`,
+          },
+        });
+      }
+    });
+
+    // Color-code requested columns (default: Competitiveness Rating)
+    const colorCodeTargets = options?.layout?.colorCodeColumns || ['competitiveness', 'Competitiveness Rating'];
+    const compColIdx = activeColumns.findIndex((c) =>
+      colorCodeTargets.some(
+        (target) =>
+          c.id.toLowerCase() === target.toLowerCase() ||
+          c.title.toLowerCase() === target.toLowerCase() ||
+          c.aliases.some((a) => target.toLowerCase().includes(a))
+      )
+    );
+
+    if (compColIdx >= 0) {
+      const compRange = {
+        sheetId: detailsSheetId,
+        startRowIndex: 1,
+        endRowIndex: items.length + 1,
+        startColumnIndex: compColIdx,
+        endColumnIndex: compColIdx + 1,
+      };
+
+      formatRequests.push(
+        {
+          addConditionalFormatRule: {
+            rule: {
+              ranges: [compRange],
+              booleanRule: {
+                condition: { type: 'TEXT_CONTAINS', values: [{ userEnteredValue: 'Fair Market' }] },
+                format: {
+                  backgroundColor: { red: 0.9, green: 0.96, blue: 0.92 }, // Soft Green #E6F4EA
+                  textFormat: { foregroundColor: { red: 0.07, green: 0.45, blue: 0.2 }, bold: true }, // #137333
                 },
               },
-              fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
             },
+            index: 0,
           },
-          // Currency format for columns E, F, G, H (Indices 4, 5, 6, 7)
-          {
-            repeatCell: {
-              range: {
-                sheetId: detailsSheetId,
-                startRowIndex: 1,
-                endRowIndex: items.length + 1,
-                startColumnIndex: 4,
-                endColumnIndex: 8,
-              },
-              cell: {
-                userEnteredFormat: {
-                  numberFormat: { type: 'CURRENCY', pattern: '"$"#,##0.00' },
-                  horizontalAlignment: 'RIGHT',
+        },
+        {
+          addConditionalFormatRule: {
+            rule: {
+              ranges: [compRange],
+              booleanRule: {
+                condition: { type: 'TEXT_CONTAINS', values: [{ userEnteredValue: 'Premium' }] },
+                format: {
+                  backgroundColor: { red: 0.95, green: 0.91, blue: 0.99 }, // Soft Purple #F3E8FD
+                  textFormat: { foregroundColor: { red: 0.46, green: 0.15, blue: 0.73 }, bold: true }, // #7627BB
                 },
               },
-              fields: 'userEnteredFormat(numberFormat,horizontalAlignment)',
             },
+            index: 1,
           },
-          // Percentage format for column I (Index 8)
-          {
-            repeatCell: {
-              range: {
-                sheetId: detailsSheetId,
-                startRowIndex: 1,
-                endRowIndex: items.length + 1,
-                startColumnIndex: 8,
-                endColumnIndex: 9,
-              },
-              cell: {
-                userEnteredFormat: {
-                  numberFormat: { type: 'PERCENT', pattern: '+0.0%;-0.0%;0.0%' },
-                  horizontalAlignment: 'RIGHT',
+        },
+        {
+          addConditionalFormatRule: {
+            rule: {
+              ranges: [compRange],
+              booleanRule: {
+                condition: { type: 'TEXT_CONTAINS', values: [{ userEnteredValue: 'Below Market' }] },
+                format: {
+                  backgroundColor: { red: 1.0, green: 0.97, blue: 0.88 }, // Soft Amber #FEF7E0
+                  textFormat: { foregroundColor: { red: 0.69, green: 0.38, blue: 0.0 }, bold: true }, // #B06000
                 },
               },
-              fields: 'userEnteredFormat(numberFormat,horizontalAlignment)',
             },
+            index: 2,
           },
-          // Center Item ID (col 0), Condition (col 3), Competitiveness (col 9)
-          {
-            repeatCell: {
-              range: {
-                sheetId: detailsSheetId,
-                startRowIndex: 1,
-                endRowIndex: items.length + 1,
-                startColumnIndex: 0,
-                endColumnIndex: 1,
-              },
-              cell: { userEnteredFormat: { horizontalAlignment: 'CENTER' } },
-              fields: 'userEnteredFormat(horizontalAlignment)',
-            },
-          },
-          {
-            repeatCell: {
-              range: {
-                sheetId: detailsSheetId,
-                startRowIndex: 1,
-                endRowIndex: items.length + 1,
-                startColumnIndex: 3,
-                endColumnIndex: 4,
-              },
-              cell: { userEnteredFormat: { horizontalAlignment: 'CENTER' } },
-              fields: 'userEnteredFormat(horizontalAlignment)',
-            },
-          },
-          {
-            repeatCell: {
-              range: {
-                sheetId: detailsSheetId,
-                startRowIndex: 1,
-                endRowIndex: items.length + 1,
-                startColumnIndex: 9,
-                endColumnIndex: 10,
-              },
-              cell: { userEnteredFormat: { horizontalAlignment: 'CENTER', textFormat: { bold: true } } },
-              fields: 'userEnteredFormat(horizontalAlignment,textFormat)',
-            },
-          },
-          // Wrap text for Strategy Notes (col 10) and Description (col 11)
-          {
-            repeatCell: {
-              range: {
-                sheetId: detailsSheetId,
-                startRowIndex: 1,
-                endRowIndex: items.length + 1,
-                startColumnIndex: 10,
-                endColumnIndex: 12,
-              },
-              cell: { userEnteredFormat: { wrapStrategy: 'WRAP' } },
-              fields: 'userEnteredFormat(wrapStrategy)',
-            },
-          },
-          // Set specific column widths for optimal reading
-          {
-            updateDimensionProperties: {
-              range: { sheetId: detailsSheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: 1 },
-              properties: { pixelSize: 125 },
-              fields: 'pixelSize',
-            },
-          },
-          {
-            updateDimensionProperties: {
-              range: { sheetId: detailsSheetId, dimension: 'COLUMNS', startIndex: 1, endIndex: 2 },
-              properties: { pixelSize: 320 },
-              fields: 'pixelSize',
-            },
-          },
-          {
-            updateDimensionProperties: {
-              range: { sheetId: detailsSheetId, dimension: 'COLUMNS', startIndex: 2, endIndex: 3 },
-              properties: { pixelSize: 160 },
-              fields: 'pixelSize',
-            },
-          },
-          {
-            updateDimensionProperties: {
-              range: { sheetId: detailsSheetId, dimension: 'COLUMNS', startIndex: 3, endIndex: 4 },
-              properties: { pixelSize: 180 },
-              fields: 'pixelSize',
-            },
-          },
-          {
-            updateDimensionProperties: {
-              range: { sheetId: detailsSheetId, dimension: 'COLUMNS', startIndex: 4, endIndex: 5 },
-              properties: { pixelSize: 130 },
-              fields: 'pixelSize',
-            },
-          },
-          {
-            updateDimensionProperties: {
-              range: { sheetId: detailsSheetId, dimension: 'COLUMNS', startIndex: 5, endIndex: 6 },
-              properties: { pixelSize: 130 },
-              fields: 'pixelSize',
-            },
-          },
-          {
-            updateDimensionProperties: {
-              range: { sheetId: detailsSheetId, dimension: 'COLUMNS', startIndex: 6, endIndex: 7 },
-              properties: { pixelSize: 130 },
-              fields: 'pixelSize',
-            },
-          },
-          {
-            updateDimensionProperties: {
-              range: { sheetId: detailsSheetId, dimension: 'COLUMNS', startIndex: 7, endIndex: 8 },
-              properties: { pixelSize: 140 },
-              fields: 'pixelSize',
-            },
-          },
-          {
-            updateDimensionProperties: {
-              range: { sheetId: detailsSheetId, dimension: 'COLUMNS', startIndex: 8, endIndex: 9 },
-              properties: { pixelSize: 150 },
-              fields: 'pixelSize',
-            },
-          },
-          {
-            updateDimensionProperties: {
-              range: { sheetId: detailsSheetId, dimension: 'COLUMNS', startIndex: 9, endIndex: 10 },
-              properties: { pixelSize: 170 },
-              fields: 'pixelSize',
-            },
-          },
-          {
-            updateDimensionProperties: {
-              range: { sheetId: detailsSheetId, dimension: 'COLUMNS', startIndex: 10, endIndex: 11 },
-              properties: { pixelSize: 380 },
-              fields: 'pixelSize',
-            },
-          },
-          {
-            updateDimensionProperties: {
-              range: { sheetId: detailsSheetId, dimension: 'COLUMNS', startIndex: 11, endIndex: 12 },
-              properties: { pixelSize: 420 },
-              fields: 'pixelSize',
-            },
-          },
-          {
-            updateDimensionProperties: {
-              range: { sheetId: detailsSheetId, dimension: 'COLUMNS', startIndex: 12, endIndex: 13 },
-              properties: { pixelSize: 250 },
-              fields: 'pixelSize',
-            },
-          },
-          // Header styling for Executive Summary (Green banner)
-          {
-            repeatCell: {
-              range: { sheetId: summarySheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 3 },
-              cell: {
-                userEnteredFormat: {
-                  backgroundColor: { red: 0.06, green: 0.62, blue: 0.35 },
-                  textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 }, bold: true, fontSize: 12 },
+        },
+        {
+          addConditionalFormatRule: {
+            rule: {
+              ranges: [compRange],
+              booleanRule: {
+                condition: { type: 'TEXT_CONTAINS', values: [{ userEnteredValue: 'Above Market' }] },
+                format: {
+                  backgroundColor: { red: 0.99, green: 0.91, blue: 0.9 }, // Soft Coral #FCE8E6
+                  textFormat: { foregroundColor: { red: 0.77, green: 0.13, blue: 0.12 }, bold: true }, // #C5221F
                 },
               },
-              fields: 'userEnteredFormat(backgroundColor,textFormat)',
+            },
+            index: 3,
+          },
+        }
+      );
+    }
+
+    // Format Executive Summary
+    formatRequests.push(
+      {
+        repeatCell: {
+          range: {
+            sheetId: summarySheetId,
+            startRowIndex: 0,
+            endRowIndex: 1,
+            startColumnIndex: 0,
+            endColumnIndex: 3,
+          },
+          cell: {
+            userEnteredFormat: {
+              backgroundColor: { red: 0.06, green: 0.62, blue: 0.35 },
+              textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 }, bold: true, fontSize: 12 },
             },
           },
-          // Column header for Executive Summary (Blue banner)
-          {
-            repeatCell: {
-              range: { sheetId: summarySheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: 3 },
-              cell: {
-                userEnteredFormat: {
-                  backgroundColor: { red: 0.2, green: 0.4, blue: 0.84 },
-                  textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 }, bold: true, fontSize: 10 },
-                },
-              },
-              fields: 'userEnteredFormat(backgroundColor,textFormat)',
+          fields: 'userEnteredFormat(backgroundColor,textFormat)',
+        },
+      },
+      {
+        repeatCell: {
+          range: {
+            sheetId: summarySheetId,
+            startRowIndex: 1,
+            endRowIndex: 2,
+            startColumnIndex: 0,
+            endColumnIndex: 3,
+          },
+          cell: {
+            userEnteredFormat: {
+              backgroundColor: { red: 0.2, green: 0.4, blue: 0.84 },
+              textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 }, bold: true, fontSize: 10 },
             },
           },
-          // Currency format for summary rows (Total Portfolio, Sold Market, Avg Listed, Avg Sold)
-          {
-            repeatCell: {
-              range: { sheetId: summarySheetId, startRowIndex: 3, endRowIndex: 5, startColumnIndex: 1, endColumnIndex: 2 },
-              cell: {
-                userEnteredFormat: {
-                  numberFormat: { type: 'CURRENCY', pattern: '"$"#,##0.00' },
-                  textFormat: { bold: true },
-                },
-              },
-              fields: 'userEnteredFormat(numberFormat,textFormat)',
+          fields: 'userEnteredFormat(backgroundColor,textFormat)',
+        },
+      },
+      {
+        repeatCell: {
+          range: {
+            sheetId: summarySheetId,
+            startRowIndex: 3,
+            endRowIndex: 6,
+            startColumnIndex: 1,
+            endColumnIndex: 2,
+          },
+          cell: {
+            userEnteredFormat: {
+              numberFormat: { type: 'CURRENCY', pattern: '"$"#,##0.00' },
+              textFormat: { bold: true },
             },
           },
-          {
-            repeatCell: {
-              range: { sheetId: summarySheetId, startRowIndex: 6, endRowIndex: 8, startColumnIndex: 1, endColumnIndex: 2 },
-              cell: {
-                userEnteredFormat: {
-                  numberFormat: { type: 'CURRENCY', pattern: '"$"#,##0.00' },
-                  textFormat: { bold: true },
-                },
-              },
-              fields: 'userEnteredFormat(numberFormat,textFormat)',
+          fields: 'userEnteredFormat(numberFormat,textFormat)',
+        },
+      },
+      {
+        repeatCell: {
+          range: {
+            sheetId: summarySheetId,
+            startRowIndex: 7,
+            endRowIndex: 10,
+            startColumnIndex: 1,
+            endColumnIndex: 2,
+          },
+          cell: {
+            userEnteredFormat: {
+              numberFormat: { type: 'CURRENCY', pattern: '"$"#,##0.00' },
+              textFormat: { bold: true },
             },
           },
-          // Percent format for variance (row 5) and breakdown rows (rows 15-19)
-          {
-            repeatCell: {
-              range: { sheetId: summarySheetId, startRowIndex: 5, endRowIndex: 6, startColumnIndex: 1, endColumnIndex: 2 },
-              cell: {
-                userEnteredFormat: {
-                  numberFormat: { type: 'PERCENT', pattern: '+0.0%;-0.0%;0.0%' },
-                  textFormat: { bold: true },
-                },
-              },
-              fields: 'userEnteredFormat(numberFormat,textFormat)',
+          fields: 'userEnteredFormat(numberFormat,textFormat)',
+        },
+      },
+      {
+        repeatCell: {
+          range: {
+            sheetId: summarySheetId,
+            startRowIndex: 6,
+            endRowIndex: 7,
+            startColumnIndex: 1,
+            endColumnIndex: 2,
+          },
+          cell: {
+            userEnteredFormat: {
+              numberFormat: { type: 'PERCENT', pattern: '+0.0%;-0.0%;0.0%' },
+              textFormat: { bold: true },
             },
           },
-          {
-            repeatCell: {
-              range: { sheetId: summarySheetId, startRowIndex: 15, endRowIndex: 20, startColumnIndex: 2, endColumnIndex: 3 },
-              cell: { userEnteredFormat: { numberFormat: { type: 'PERCENT', pattern: '0.0%' } } },
-              fields: 'userEnteredFormat(numberFormat)',
+          fields: 'userEnteredFormat(numberFormat,textFormat)',
+        },
+      },
+      {
+        repeatCell: {
+          range: {
+            sheetId: summarySheetId,
+            startRowIndex: 17,
+            endRowIndex: 22,
+            startColumnIndex: 2,
+            endColumnIndex: 3,
+          },
+          cell: {
+            userEnteredFormat: {
+              numberFormat: { type: 'PERCENT', pattern: '0.0%' },
             },
           },
-          // Auto resize Executive Summary
-          {
-            autoResizeDimensions: {
-              dimensions: { sheetId: summarySheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: 3 },
-            },
-          },
-        ]
-      : [
-          // Format Inventory Details Header
-          {
-            repeatCell: {
-              range: {
-                sheetId: detailsSheetId,
-                startRowIndex: 0,
-                endRowIndex: 1,
-                startColumnIndex: 0,
-                endColumnIndex: 9,
-              },
-              cell: {
-                userEnteredFormat: {
-                  backgroundColor: { red: 0.1, green: 0.14, blue: 0.22 }, // Slate Navy
-                  textFormat: {
-                    foregroundColor: { red: 1, green: 1, blue: 1 },
-                    bold: true,
-                    fontSize: 10,
-                  },
-                  horizontalAlignment: 'CENTER',
-                  verticalAlignment: 'MIDDLE',
-                },
-              },
-              fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
-            },
-          },
-          // Format Currency in Columns E and G
-          {
-            repeatCell: {
-              range: {
-                sheetId: detailsSheetId,
-                startRowIndex: 1,
-                endRowIndex: items.length + 1,
-                startColumnIndex: 4,
-                endColumnIndex: 5,
-              },
-              cell: {
-                userEnteredFormat: {
-                  numberFormat: {
-                    type: 'CURRENCY',
-                    pattern: '"$"#,##0.00',
-                  },
-                  horizontalAlignment: 'RIGHT',
-                },
-              },
-              fields: 'userEnteredFormat(numberFormat,horizontalAlignment)',
-            },
-          },
-          {
-            repeatCell: {
-              range: {
-                sheetId: detailsSheetId,
-                startRowIndex: 1,
-                endRowIndex: items.length + 1,
-                startColumnIndex: 6,
-                endColumnIndex: 7,
-              },
-              cell: {
-                userEnteredFormat: {
-                  numberFormat: {
-                    type: 'CURRENCY',
-                    pattern: '"$"#,##0.00',
-                  },
-                  horizontalAlignment: 'RIGHT',
-                },
-              },
-              fields: 'userEnteredFormat(numberFormat,horizontalAlignment)',
-            },
-          },
-          // Center Item ID, Qty, Photos
-          {
-            repeatCell: {
-              range: {
-                sheetId: detailsSheetId,
-                startRowIndex: 1,
-                endRowIndex: items.length + 1,
-                startColumnIndex: 0,
-                endColumnIndex: 1,
-              },
-              cell: {
-                userEnteredFormat: {
-                  horizontalAlignment: 'CENTER',
-                },
-              },
-              fields: 'userEnteredFormat(horizontalAlignment)',
-            },
-          },
-          {
-            repeatCell: {
-              range: {
-                sheetId: detailsSheetId,
-                startRowIndex: 1,
-                endRowIndex: items.length + 1,
-                startColumnIndex: 5,
-                endColumnIndex: 6,
-              },
-              cell: {
-                userEnteredFormat: {
-                  horizontalAlignment: 'CENTER',
-                },
-              },
-              fields: 'userEnteredFormat(horizontalAlignment)',
-            },
-          },
-          {
-            repeatCell: {
-              range: {
-                sheetId: detailsSheetId,
-                startRowIndex: 1,
-                endRowIndex: items.length + 1,
-                startColumnIndex: 7,
-                endColumnIndex: 8,
-              },
-              cell: {
-                userEnteredFormat: {
-                  horizontalAlignment: 'CENTER',
-                },
-              },
-              fields: 'userEnteredFormat(horizontalAlignment)',
-            },
-          },
-          // Format Executive Summary Title (A1:C1)
-          {
-            repeatCell: {
-              range: {
-                sheetId: summarySheetId,
-                startRowIndex: 0,
-                endRowIndex: 1,
-                startColumnIndex: 0,
-                endColumnIndex: 3,
-              },
-              cell: {
-                userEnteredFormat: {
-                  backgroundColor: { red: 0.06, green: 0.62, blue: 0.35 }, // Sheets Green
-                  textFormat: {
-                    foregroundColor: { red: 1, green: 1, blue: 1 },
-                    bold: true,
-                    fontSize: 12,
-                  },
-                  horizontalAlignment: 'LEFT',
-                },
-              },
-              fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)',
-            },
-          },
-          // Format Executive Summary Header (A2:C2)
-          {
-            repeatCell: {
-              range: {
-                sheetId: summarySheetId,
-                startRowIndex: 1,
-                endRowIndex: 2,
-                startColumnIndex: 0,
-                endColumnIndex: 3,
-              },
-              cell: {
-                userEnteredFormat: {
-                  backgroundColor: { red: 0.2, green: 0.4, blue: 0.84 }, // Google Blue
-                  textFormat: {
-                    foregroundColor: { red: 1, green: 1, blue: 1 },
-                    bold: true,
-                    fontSize: 10,
-                  },
-                },
-              },
-              fields: 'userEnteredFormat(backgroundColor,textFormat)',
-            },
-          },
-          // Format Percentage for Category Breakdown
-          {
-            repeatCell: {
-              range: {
-                sheetId: summarySheetId,
-                startRowIndex: 13,
-                endRowIndex: 13 + Object.keys(inventory.categoryCounts).length,
-                startColumnIndex: 2,
-                endColumnIndex: 3,
-              },
-              cell: {
-                userEnteredFormat: {
-                  numberFormat: {
-                    type: 'PERCENT',
-                    pattern: '0.0%',
-                  },
-                  horizontalAlignment: 'RIGHT',
-                },
-              },
-              fields: 'userEnteredFormat(numberFormat,horizontalAlignment)',
-            },
-          },
-          // Auto-resize dimensions
-          {
-            autoResizeDimensions: {
-              dimensions: {
-                sheetId: detailsSheetId,
-                dimension: 'COLUMNS',
-                startIndex: 0,
-                endIndex: 9,
-              },
-            },
-          },
-          {
-            autoResizeDimensions: {
-              dimensions: {
-                sheetId: summarySheetId,
-                dimension: 'COLUMNS',
-                startIndex: 0,
-                endIndex: 3,
-              },
-            },
-          },
-        ];
+          fields: 'userEnteredFormat(numberFormat)',
+        },
+      },
+      {
+        autoResizeDimensions: {
+          dimensions: { sheetId: summarySheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: 3 },
+        },
+      }
+    );
 
     try {
-      await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
+      const formatRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -1036,11 +1194,14 @@ export class GoogleSheetsService {
         },
         body: JSON.stringify({ requests: formatRequests }),
       });
+      if (!formatRes.ok) {
+        console.warn('[GoogleSheets] Formatting update error (non-critical):', await formatRes.text());
+      }
     } catch (fmtErr) {
-      console.warn('[GoogleSheets] Formatting update error (non-critical):', fmtErr);
+      console.warn('[GoogleSheets] Formatting update network error (non-critical):', fmtErr);
     }
 
-    // 6. Ensure read access via Google Drive API
+    // 7. Ensure read access via Google Drive API
     try {
       await fetch(`https://www.googleapis.com/drive/v3/files/${spreadsheetId}/permissions`, {
         method: 'POST',
@@ -1064,6 +1225,7 @@ export class GoogleSheetsService {
       totalValue: inventory.totalValue,
       sheetTitle,
       isExistingSheet,
+      columns: activeColumns.map((c) => c.id),
     };
   }
 
@@ -1081,4 +1243,3 @@ export class GoogleSheetsService {
     });
   }
 }
-

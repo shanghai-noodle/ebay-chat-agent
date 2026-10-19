@@ -88,6 +88,14 @@ const EXTRACTION_SCHEMA = {
   required: ['title', 'categoryKeywords', 'condition', 'conditionDescription', 'aspects', 'descriptionHtml', 'suggestedPrice', 'marketIntelligence'],
 };
 
+export interface SheetCustomizationIntent {
+  moveColumns?: Array<{ column: string; toPosition: string | number }>;
+  columnsToAdd?: Array<{ column?: string; id?: string; title?: string; position?: string | number }>;
+  columnsToRemove?: string[];
+  colorCodeColumns?: string[];
+  rowHeight?: number;
+}
+
 export class GeminiService {
   private apiKey: string;
   private listingModels = ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.5-flash'];
@@ -279,6 +287,7 @@ Update the draft fields based on the user's instruction. If the user mentions a 
     draftUpdates?: Partial<ListingDraft>;
     isInventoryInquiry?: boolean;
     isSheetExportRequested?: boolean;
+    sheetCustomization?: SheetCustomizationIntent;
   }> {
     const draftContext = currentDraft
       ? `Active Listing Draft in Current Thread:
@@ -344,7 +353,17 @@ Instructions:
    - Set "hasDraftUpdates": true
    - In "draftUpdates", provide only the updated fields (e.g. { "price": 45, "shippingCost": 0 }).
    - Otherwise, set "hasDraftUpdates": false.
-6. Format your response cleanly for Google Chat with bold headers, bullet points, and neat spacing.`;
+6. If the user asks to modify, rearrange, customize, format, or refresh the Google Sheet layout:
+   - For example: "move the item link to the first column", "add a second column using item thumbnail", "color code Competitiveness Rating column", "add Gemini Suggested price adjustment", "remove category column":
+   - Set "isSheetExportRequested": true
+   - Populate "sheetCustomization" with the structured changes:
+     * moveColumns: e.g. [{ "column": "item link", "toPosition": "first" }]
+     * columnsToAdd: e.g. [{ "column": "item thumbnail", "position": "second" }]
+     * columnsToRemove: e.g. ["category"]
+     * colorCodeColumns: e.g. ["Competitiveness Rating"]
+     * rowHeight: e.g. 56 if thumbnails are included
+   - In your replyText, confirm specifically what modifications and columns are being applied and updated in their Google Sheet.
+7. Format your response cleanly for Google Chat with bold headers, bullet points, and neat spacing.`;
 
     try {
       const outputText = await this.callInteractionsApi({
@@ -365,7 +384,49 @@ Instructions:
               },
               isSheetExportRequested: {
                 type: 'boolean',
-                description: 'True if the user asked to create, export, generate, or report their inventory in a Google Sheet or spreadsheet.',
+                description: 'True if the user asked to create, export, generate, or report their inventory in a Google Sheet or spreadsheet, or requested sheet modifications.',
+              },
+              sheetCustomization: {
+                type: 'object',
+                description: 'Detected layout customization commands for the Google Sheet report, such as reordering columns, adding/moving thumbnail or link columns, removing columns, or color-coding columns.',
+                properties: {
+                  moveColumns: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        column: { type: 'string', description: 'Name or identifier of column to move, e.g. "item link", "listingUrl", "thumbnail", "title"' },
+                        toPosition: { type: 'string', description: 'Target position, e.g. "first", "second", "1", "2", "last"' },
+                      },
+                      required: ['column', 'toPosition'],
+                    },
+                  },
+                  columnsToAdd: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        column: { type: 'string', description: 'Column to add, e.g. "thumbnail", "suggestedPrice", "suggestedAdjustment", "itemDescription"' },
+                        position: { type: 'string', description: 'Position to place new column, e.g. "first", "second", "2", "last"' },
+                      },
+                      required: ['column'],
+                    },
+                  },
+                  columnsToRemove: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Columns to remove from the sheet',
+                  },
+                  colorCodeColumns: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Columns to apply conditional color coding to, e.g. ["Competitiveness Rating"]',
+                  },
+                  rowHeight: {
+                    type: 'number',
+                    description: 'Optional row height in pixels, e.g. 56 for thumbnails',
+                  },
+                },
               },
               hasDraftUpdates: {
                 type: 'boolean',

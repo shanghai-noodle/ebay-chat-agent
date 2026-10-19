@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { CloudflareBindings } from './env';
 import { ListingDraft } from './types/draft';
 import { DraftStore } from './services/draft-store';
-import { GeminiService } from './services/gemini';
+import { GeminiService, SheetCustomizationIntent } from './services/gemini';
 import { EbayEPSService } from './services/ebay/eps';
 import { EbayTaxonomyService } from './services/ebay/taxonomy';
 import { EbayTradingService, SellerInventorySummary } from './services/ebay/trading';
@@ -12,9 +12,103 @@ import {
   GoogleSheetsService,
   GoogleSheetsApiDisabledError,
   GoogleSheetsDriveQuotaError,
+  SheetLayoutConfig,
 } from './services/google-sheets';
 import { AVATAR_BASE64 } from './assets/avatar-data';
 import { ImageProcessor } from './services/image-processor';
+
+function parseSheetCustomization(
+  messageText: string,
+  geminiCustomization?: SheetCustomizationIntent
+): SheetLayoutConfig {
+  const layout: SheetLayoutConfig = {
+    moveColumns: geminiCustomization?.moveColumns ? [...geminiCustomization.moveColumns] : [],
+    columnsToAdd: geminiCustomization?.columnsToAdd ? [...geminiCustomization.columnsToAdd] : [],
+    columnsToRemove: geminiCustomization?.columnsToRemove ? [...geminiCustomization.columnsToRemove] : [],
+    colorCodeColumns: geminiCustomization?.colorCodeColumns ? [...geminiCustomization.colorCodeColumns] : [],
+    rowHeight: geminiCustomization?.rowHeight,
+  };
+
+  // 1. Move Link / URL
+  if (
+    /(?:move|put|place)\s+(?:the\s+)?(?:item\s+)?(?:link|url|listing\s*url|listing\s*link)\s+to\s+(?:the\s+)?(?:first|1st|start|col(?:umn)?\s*1|col(?:umn)?\s*a)\b/i.test(
+      messageText
+    )
+  ) {
+    if (
+      !layout.moveColumns?.some(
+        (m) => m.column.toLowerCase().includes('link') || m.column.toLowerCase().includes('url')
+      )
+    ) {
+      layout.moveColumns = layout.moveColumns || [];
+      layout.moveColumns.push({ column: 'listingUrl', toPosition: 'first' });
+    }
+  }
+
+  // 2. Add / Move Thumbnail
+  if (
+    /(?:add|include|insert|using|show)\s+(?:a\s+)?(?:second\s+column\s+using\s+)?(?:item\s+)?(?:thumbnail|image|photo|picture)/i.test(
+      messageText
+    ) ||
+    /\b(?:second\s+column\s+using\s+item\s+thumbnail|add\s+(?:a\s+)?(?:item\s+)?thumbnail)\b/i.test(
+      messageText
+    )
+  ) {
+    const isSecond = /\b(second|2nd|col(?:umn)?\s*2|col(?:umn)?\s*b)\b/i.test(messageText);
+    const pos = isSecond ? 'second' : 'second';
+    if (
+      !layout.columnsToAdd?.some(
+        (a) =>
+          (a.column || '').toLowerCase().includes('thumb') ||
+          (a.column || '').toLowerCase().includes('image')
+      )
+    ) {
+      layout.columnsToAdd = layout.columnsToAdd || [];
+      layout.columnsToAdd.push({ column: 'thumbnail', position: pos });
+    }
+    layout.rowHeight = 56;
+  }
+
+  // 3. Color Code Columns
+  if (
+    /color\s*code\s+["']?([^"'\n,]+?)["']?\s*(?:column)?/i.test(messageText) ||
+    /\bcolor\s*code\b/i.test(messageText)
+  ) {
+    const match = messageText.match(/color\s*code\s+["']?([^"'\n,]+?)["']?\s*(?:column)?/i);
+    const target = match && match[1]?.trim() ? match[1].trim() : 'Competitiveness Rating';
+    layout.colorCodeColumns = layout.colorCodeColumns || [];
+    if (!layout.colorCodeColumns.includes(target)) {
+      layout.colorCodeColumns.push(target);
+    }
+  }
+
+  // 4. Gemini Suggested Price / Suggested Price Adjustment
+  if (/\b(?:add|include)\s+(?:a\s+)?(?:gemini\s+)?suggested\s+price(?:\s+adjustment)?\b/i.test(messageText)) {
+    layout.columnsToAdd = layout.columnsToAdd || [];
+    if (/\badjustment\b/i.test(messageText)) {
+      if (!layout.columnsToAdd.some((a) => (a.column || '').toLowerCase().includes('adjust'))) {
+        layout.columnsToAdd.push({ column: 'suggestedAdjustment', position: 'last' });
+      }
+    }
+    if (!layout.columnsToAdd.some((a) => (a.column || '').toLowerCase() === 'suggestedprice')) {
+      layout.columnsToAdd.push({ column: 'suggestedPrice', position: 'last' });
+    }
+  }
+
+  // 5. Column Removal
+  const removeMatches = messageText.matchAll(/(?:remove|delete|drop|hide)\s+(?:the\s+)?["']?([a-zA-Z\s]+?)["']?\s+column\b/gi);
+  for (const match of removeMatches) {
+    if (match && match[1]) {
+      const colToRem = match[1].trim();
+      layout.columnsToRemove = layout.columnsToRemove || [];
+      if (!layout.columnsToRemove.includes(colToRem)) {
+        layout.columnsToRemove.push(colToRem);
+      }
+    }
+  }
+
+  return layout;
+}
 
 const app = new Hono<{ Bindings: CloudflareBindings }>();
 
@@ -830,7 +924,10 @@ app.post('/', async (c) => {
           await c.env.DRAFTS_KV.put('report:master_sheet_id', targetSheetId);
         }
 
-        const handleSheetReportRequest = async (explicitSheetId?: string) => {
+        const handleSheetReportRequest = async (
+          explicitSheetId?: string,
+          customization?: SheetCustomizationIntent
+        ) => {
           if (!inventorySummary || inventorySummary.totalCount === 0) {
             await GoogleChatMediaService.postMessage(
               spaceId,
@@ -862,16 +959,86 @@ app.post('/', async (c) => {
 
             const isClearRequested = /\b(clear|wipe|overwrite|fresh|clean)\b/i.test(messageText);
 
+            // 1. Load baseline or persistent custom column layout preferences from KV
+            let storedLayout: SheetLayoutConfig = {
+              columnOrder: [
+                'listingUrl',
+                'thumbnail',
+                'itemId',
+                'title',
+                'category',
+                'condition',
+                'listedPrice',
+                'activeLow',
+                'activeHigh',
+                'soldAvg',
+                'compsVariance',
+                'competitiveness',
+                'suggestedPrice',
+                'suggestedAdjustment',
+                'strategyNotes',
+                'itemDescription',
+              ],
+              colorCodeColumns: ['competitiveness', 'Competitiveness Rating'],
+              rowHeight: 56,
+            };
+
+            try {
+              const cachedPrefs = (await c.env.DRAFTS_KV?.get(
+                'report:sheet_layout_prefs',
+                'json'
+              )) as SheetLayoutConfig | null;
+              if (cachedPrefs && typeof cachedPrefs === 'object') {
+                if (cachedPrefs.columnOrder && cachedPrefs.columnOrder.length > 0) {
+                  storedLayout.columnOrder = cachedPrefs.columnOrder;
+                }
+                if (cachedPrefs.colorCodeColumns && cachedPrefs.colorCodeColumns.length > 0) {
+                  storedLayout.colorCodeColumns = cachedPrefs.colorCodeColumns;
+                }
+                if (cachedPrefs.rowHeight) {
+                  storedLayout.rowHeight = cachedPrefs.rowHeight;
+                }
+              }
+            } catch (kvErr) {
+              console.warn('[LayoutPrefs] Failed to read stored layout preferences:', kvErr);
+            }
+
+            // 2. Parse conversational modifications from user message or Gemini
+            const reqCustom = parseSheetCustomization(messageText, customization);
+
+            const effectiveLayout: SheetLayoutConfig = {
+              columnOrder: storedLayout.columnOrder,
+              moveColumns: reqCustom.moveColumns?.length ? reqCustom.moveColumns : undefined,
+              columnsToAdd: reqCustom.columnsToAdd?.length ? reqCustom.columnsToAdd : undefined,
+              columnsToRemove: reqCustom.columnsToRemove?.length ? reqCustom.columnsToRemove : undefined,
+              colorCodeColumns: [
+                ...(storedLayout.colorCodeColumns || []),
+                ...(reqCustom.colorCodeColumns || []),
+              ],
+              rowHeight: reqCustom.rowHeight || storedLayout.rowHeight || 56,
+            };
+
             const sheetsService = new GoogleSheetsService(c.env.GOOGLE_SERVICE_ACCOUNT_JSON);
             const report = await sheetsService.createInventorySpreadsheet(inventorySummary, {
               spreadsheetId: effectiveSheetId,
               userEmail: senderEmail,
               clearExisting: isClearRequested || Boolean(effectiveSheetId),
               cmaData,
+              layout: effectiveLayout,
             });
 
             if (report.spreadsheetId && c.env.DRAFTS_KV) {
               await c.env.DRAFTS_KV.put('report:master_sheet_id', report.spreadsheetId);
+            }
+
+            // 3. Persist the updated column order and styling back to KV so future reports stick!
+            if (report.columns && c.env.DRAFTS_KV) {
+              const updatedPrefs: SheetLayoutConfig = {
+                columnOrder: report.columns,
+                colorCodeColumns: effectiveLayout.colorCodeColumns,
+                rowHeight: effectiveLayout.rowHeight,
+              };
+              await c.env.DRAFTS_KV.put('report:sheet_layout_prefs', JSON.stringify(updatedPrefs));
             }
 
             const sheetCard = GoogleChatCards.buildSheetCreatedCard(report).cardsV2[0];
@@ -943,16 +1110,16 @@ app.post('/', async (c) => {
               c.env.GOOGLE_SERVICE_ACCOUNT_JSON
             );
 
-            // 2. If user requested a Google Sheet report, generate and post it
+            // 2. If user requested a Google Sheet report or layout modification, generate and post it
             const isSheetRequested =
               chatResult.isSheetExportRequested ||
               Boolean(targetSheetId) ||
-              /\b(google\s+sheets?|sheets?|spreadsheets?|excel|csv|export\s+to\s+sheets?|reporting|report|market\s+research|comps)\b/i.test(
+              /\b(google\s+sheets?|sheets?|spreadsheets?|excel|csv|export\s+to\s+sheets?|reporting|report|market\s+research|comps|thumbnail|column|columns|color\s*code)\b/i.test(
                 messageText
               );
 
             if (isSheetRequested) {
-              await handleSheetReportRequest(targetSheetId);
+              await handleSheetReportRequest(targetSheetId, chatResult.sheetCustomization);
             } else if (
               (isInventoryQuery || chatResult.isInventoryInquiry) &&
               inventorySummary &&
@@ -1126,13 +1293,16 @@ app.post('/', async (c) => {
             );
           }
 
-          // If the user requested a Google Sheet report, generate and post it
+          // If the user requested a Google Sheet report or layout customization, generate and post it
           const isSheetRequested =
             chatResult.isSheetExportRequested ||
-            /\b(google\s+sheets?|sheets?|spreadsheets?|excel|csv|export\s+to\s+sheets?|reporting)\b/i.test(messageText);
+            Boolean(targetSheetId) ||
+            /\b(google\s+sheets?|sheets?|spreadsheets?|excel|csv|export\s+to\s+sheets?|reporting|report|market\s+research|comps|thumbnail|column|columns|color\s*code)\b/i.test(
+              messageText
+            );
 
           if (isSheetRequested) {
-            await handleSheetReportRequest();
+            await handleSheetReportRequest(targetSheetId, chatResult.sheetCustomization);
           } else if (
             (isInventoryQuery || chatResult.isInventoryInquiry) &&
             inventorySummary &&
