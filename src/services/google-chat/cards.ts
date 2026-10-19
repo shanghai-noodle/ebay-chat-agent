@@ -1,5 +1,6 @@
 import { ListingDraft } from '../../types/draft';
 import { SellerInventorySummary } from '../ebay/trading';
+import { SpreadsheetReportResult } from '../google-sheets';
 
 export class GoogleChatCards {
   /**
@@ -331,6 +332,14 @@ export class GoogleChatCards {
                     buttonList: {
                       buttons: [
                         {
+                          text: '📊 Export to Google Sheet',
+                          onClick: {
+                            action: {
+                              function: 'create_sheet_report',
+                            },
+                          },
+                        },
+                        {
                           text: '🌐 Browse Storefront',
                           onClick: {
                             openLink: {
@@ -343,6 +352,121 @@ export class GoogleChatCards {
                           onClick: {
                             openLink: {
                               url: 'https://www.ebay.com/usr/ly014132',
+                            },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    };
+  }
+
+  /**
+   * Card rendered when a Google Sheet inventory report is generated.
+   */
+  static buildSheetCreatedCard(report: SpreadsheetReportResult): any {
+    return {
+      cardsV2: [
+        {
+          cardId: `sheet-report-${Date.now()}`,
+          card: {
+            header: {
+              title: '📊 Google Sheets Report Generated',
+              subtitle: `${report.totalListings} Active Listings · $${report.totalValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`,
+              imageUrl: 'https://ssl.gstatic.com/docs/doclist/images/mediatype/icon_1_spreadsheet_x64.png',
+              imageType: 'SQUARE',
+            },
+            sections: [
+              {
+                header: 'Spreadsheet Details',
+                widgets: [
+                  {
+                    decoratedText: {
+                      topLabel: 'Spreadsheet Title',
+                      text: `<b>${report.sheetTitle}</b>`,
+                    },
+                  },
+                  {
+                    decoratedText: {
+                      topLabel: 'Worksheets Included',
+                      text: `• <b>Inventory Details:</b> All ${report.totalListings} active items with Item IDs, prices, quantities, formulas, and direct eBay URLs.<br>• <b>Executive Summary:</b> Portfolio KPI cards, dynamic formulas, category breakdown %, and store links.`,
+                      wrapText: true,
+                    },
+                  },
+                ],
+              },
+              {
+                widgets: [
+                  {
+                    buttonList: {
+                      buttons: [
+                        {
+                          text: '📊 Open Google Sheet',
+                          onClick: {
+                            openLink: {
+                              url: report.spreadsheetUrl,
+                            },
+                          },
+                        },
+                        {
+                          text: '🌐 View Storefront',
+                          onClick: {
+                            openLink: {
+                              url: 'https://bluestonelab.trade',
+                            },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    };
+  }
+
+  /**
+   * Card rendered if Google Sheets API is not enabled on the GCP project.
+   */
+  static buildSheetApiDisabledCard(activationUrl: string): any {
+    return {
+      cardsV2: [
+        {
+          cardId: `sheet-disabled-${Date.now()}`,
+          card: {
+            header: {
+              title: '⚠️ Google Sheets API Not Enabled',
+              subtitle: 'One-Time Setup Required on Google Cloud',
+              imageUrl: 'https://www.gstatic.com/images/branding/product/2x/sheets_2020q4_48dp.png',
+              imageType: 'SQUARE',
+            },
+            sections: [
+              {
+                widgets: [
+                  {
+                    decoratedText: {
+                      topLabel: 'Action Required',
+                      text: 'Your eBay agent is fully programmed to generate live Google Sheets reports, but the <b>Google Sheets API</b> is currently disabled on Google Cloud project <code>shanghainoodle</code>.<br><br>Click below to enable it with 1 click. Once enabled, ask me again and I will create your report immediately!',
+                      wrapText: true,
+                    },
+                  },
+                  {
+                    buttonList: {
+                      buttons: [
+                        {
+                          text: '🔗 Enable Google Sheets API',
+                          onClick: {
+                            openLink: {
+                              url: activationUrl,
                             },
                           },
                         },

@@ -276,6 +276,7 @@ Update the draft fields based on the user's instruction. If the user mentions a 
     hasDraftUpdates: boolean;
     draftUpdates?: Partial<ListingDraft>;
     isInventoryInquiry?: boolean;
+    isSheetExportRequested?: boolean;
   }> {
     const draftContext = currentDraft
       ? `Active Listing Draft in Current Thread:
@@ -333,13 +334,15 @@ Instructions:
      * Specific Item Lookups: If they ask about a specific item (by character, title, or Item ID like 237131227545), give detailed stats and advice on that specific listing.
      * Filtering: If they ask for items matching a filter (e.g. "items under $50", "list my Transformers", "what Disney items do I have?"), filter and list those exact items with their prices and links.
      * Actionable Advice: Note pricing health, sealed condition status (MISB/NIB), and tips to maximize sell-through.
-   - Set "isInventoryInquiry": true.
-3. If they ask about competitor prices or market comps, give realistic market data and eBay trends.
-4. If the user's message asks to update/modify the draft (e.g. price change, shipping cost, title change, condition change, or description update):
+3. If the user asks to create, export, generate, or report their listings/inventory in a Google Sheet or spreadsheet (e.g. "create a google sheet", "export to sheets", "spreadsheet for reporting", "generate sheet"):
+   - Acknowledge that you are generating their live Google Sheet report with all active listings, pricing formulas, and executive portfolio summary.
+   - Set "isSheetExportRequested": true.
+4. If they ask about competitor prices or market comps, give realistic market data and eBay trends.
+5. If the user's message asks to update/modify the draft (e.g. price change, shipping cost, title change, condition change, or description update):
    - Set "hasDraftUpdates": true
    - In "draftUpdates", provide only the updated fields (e.g. { "price": 45, "shippingCost": 0 }).
    - Otherwise, set "hasDraftUpdates": false.
-5. Format your response cleanly for Google Chat with bold headers, bullet points, and neat spacing.`;
+6. Format your response cleanly for Google Chat with bold headers, bullet points, and neat spacing.`;
 
     try {
       const outputText = await this.callInteractionsApi({
@@ -357,6 +360,10 @@ Instructions:
               isInventoryInquiry: {
                 type: 'boolean',
                 description: 'True if the user asked about, inquired about, or requested analysis on their eBay inventory or listed items.',
+              },
+              isSheetExportRequested: {
+                type: 'boolean',
+                description: 'True if the user asked to create, export, generate, or report their inventory in a Google Sheet or spreadsheet.',
               },
               hasDraftUpdates: {
                 type: 'boolean',
@@ -396,6 +403,7 @@ Instructions:
         replyText: `I received your message: "${userMessage}". Let me know if you would like to adjust the price, title, or publish!`,
         hasDraftUpdates: false,
         isInventoryInquiry: false,
+        isSheetExportRequested: false,
       };
     }
   }

@@ -20,19 +20,21 @@ export interface ChatAttachment {
 }
 
 export class GoogleChatMediaService {
-  private static cachedToken: { email: string; token: string; expiresAt: number } | null = null;
+  private static cachedTokens = new Map<string, { token: string; expiresAt: number }>();
 
   /**
    * Generates a Google OAuth2 access token from a service account private key using Web Crypto.
    */
-  static async getServiceAccountAccessToken(serviceAccount: ServiceAccountCredentials): Promise<string> {
+  static async getServiceAccountAccessToken(
+    serviceAccount: ServiceAccountCredentials,
+    scopes: string[] = ['https://www.googleapis.com/auth/chat.bot']
+  ): Promise<string> {
+    const scopeStr = scopes.slice().sort().join(' ');
+    const cacheKey = `${serviceAccount.client_email}:${scopeStr}`;
     const now = Math.floor(Date.now() / 1000);
-    if (
-      this.cachedToken &&
-      this.cachedToken.email === serviceAccount.client_email &&
-      this.cachedToken.expiresAt > now + 60
-    ) {
-      return this.cachedToken.token;
+    const cached = this.cachedTokens.get(cacheKey);
+    if (cached && cached.expiresAt > now + 60) {
+      return cached.token;
     }
 
     const tokenUri = serviceAccount.token_uri || 'https://oauth2.googleapis.com/token';
@@ -44,7 +46,7 @@ export class GoogleChatMediaService {
 
     const payload = {
       iss: serviceAccount.client_email,
-      scope: 'https://www.googleapis.com/auth/chat.bot',
+      scope: scopeStr,
       aud: tokenUri,
       exp: now + 3600,
       iat: now,
@@ -121,11 +123,10 @@ export class GoogleChatMediaService {
 
     const tokenData = (await tokenRes.json()) as { access_token: string; expires_in?: number };
     const expiresIn = tokenData.expires_in || 3600;
-    this.cachedToken = {
-      email: serviceAccount.client_email,
+    this.cachedTokens.set(cacheKey, {
       token: tokenData.access_token,
       expiresAt: now + expiresIn,
-    };
+    });
     return tokenData.access_token;
   }
 

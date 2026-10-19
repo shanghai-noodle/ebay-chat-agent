@@ -8,6 +8,7 @@ import { EbayTaxonomyService } from './services/ebay/taxonomy';
 import { EbayTradingService, SellerInventorySummary } from './services/ebay/trading';
 import { GoogleChatCards } from './services/google-chat/cards';
 import { GoogleChatMediaService } from './services/google-chat/media';
+import { GoogleSheetsService, GoogleSheetsApiDisabledError } from './services/google-sheets';
 import { AVATAR_BASE64 } from './assets/avatar-data';
 import { ImageProcessor } from './services/image-processor';
 
@@ -420,6 +421,84 @@ app.post('/', async (c) => {
         },
       });
     }
+
+    if (actionMethod === 'create_sheet_report') {
+      waitUntil(
+        (async () => {
+          try {
+            const tradingService = new EbayTradingService({
+              epsUrl: c.env.EBAY_EPS_URL,
+              userToken: c.env.EBAY_USER_TOKEN,
+              appId: c.env.EBAY_APP_ID,
+              devId: c.env.EBAY_DEV_ID,
+              certId: c.env.EBAY_CERT_ID,
+            });
+
+            const inventorySummary = await tradingService.getActiveSellerListings(false, c.env);
+            if (!inventorySummary || inventorySummary.totalCount === 0) {
+              await GoogleChatMediaService.postMessage(
+                spaceId,
+                {
+                  ...(threadKey ? { thread: { name: threadKey } } : {}),
+                  text: '⚠️ No active listings found in your eBay store to generate a report.',
+                },
+                c.env.GOOGLE_SERVICE_ACCOUNT_JSON
+              );
+              return;
+            }
+
+            if (!c.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+              throw new Error('Missing GOOGLE_SERVICE_ACCOUNT_JSON');
+            }
+            const sheetsService = new GoogleSheetsService(c.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+            const report = await sheetsService.createInventorySpreadsheet(inventorySummary, {
+              userEmail: params.userEmail,
+            });
+
+            const sheetCard = GoogleChatCards.buildSheetCreatedCard(report).cardsV2[0];
+            await GoogleChatMediaService.postMessage(
+              spaceId,
+              {
+                ...(threadKey ? { thread: { name: threadKey } } : {}),
+                cardsV2: [sheetCard],
+              },
+              c.env.GOOGLE_SERVICE_ACCOUNT_JSON
+            );
+          } catch (err: any) {
+            console.error('[GoogleSheets] Error generating spreadsheet from button:', err);
+            let errCard: any;
+            if (err instanceof GoogleSheetsApiDisabledError) {
+              errCard = GoogleChatCards.buildSheetApiDisabledCard(err.activationUrl).cardsV2[0];
+            } else {
+              errCard = GoogleChatCards.buildErrorCard(
+                `Failed to create Google Sheet: ${err.message || err}`
+              ).cardsV2[0];
+            }
+
+            if (spaceId) {
+              await GoogleChatMediaService.postMessage(
+                spaceId,
+                {
+                  ...(threadKey ? { thread: { name: threadKey } } : {}),
+                  cardsV2: [errCard],
+                },
+                c.env.GOOGLE_SERVICE_ACCOUNT_JSON
+              );
+            }
+          }
+        })()
+      );
+
+      return c.json({
+        renderActions: {
+          action: {
+            notification: {
+              text: '📊 Generating your Google Sheet report...',
+            },
+          },
+        },
+      });
+    }
   }
 
   // 3. User sent a message (with photo or conversational text)
@@ -716,6 +795,59 @@ app.post('/', async (c) => {
           ) ||
           /\b(237\d{9}|336\d{9}|334\d{9}|234\d{9})\b/.test(messageText);
 
+        const handleSheetReportRequest = async () => {
+          if (!inventorySummary || inventorySummary.totalCount === 0) {
+            await GoogleChatMediaService.postMessage(
+              spaceId,
+              {
+                ...(threadKey ? { thread: { name: threadKey } } : {}),
+                text: '⚠️ No active listings found in your eBay store to generate a report.',
+              },
+              c.env.GOOGLE_SERVICE_ACCOUNT_JSON
+            );
+            return;
+          }
+
+          try {
+            if (!c.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+              throw new Error('Missing GOOGLE_SERVICE_ACCOUNT_JSON in environment');
+            }
+            const sheetsService = new GoogleSheetsService(c.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+            const report = await sheetsService.createInventorySpreadsheet(inventorySummary, {
+              userEmail: senderEmail,
+            });
+
+            const sheetCard = GoogleChatCards.buildSheetCreatedCard(report).cardsV2[0];
+            await GoogleChatMediaService.postMessage(
+              spaceId,
+              {
+                ...(threadKey ? { thread: { name: threadKey } } : {}),
+                cardsV2: [sheetCard],
+              },
+              c.env.GOOGLE_SERVICE_ACCOUNT_JSON
+            );
+          } catch (err: any) {
+            console.error('[GoogleSheets] Conversational sheet generation error:', err);
+            let errCard: any;
+            if (err instanceof GoogleSheetsApiDisabledError) {
+              errCard = GoogleChatCards.buildSheetApiDisabledCard(err.activationUrl).cardsV2[0];
+            } else {
+              errCard = GoogleChatCards.buildErrorCard(
+                `Failed to generate Google Sheet: ${err.message || err}`
+              ).cardsV2[0];
+            }
+
+            await GoogleChatMediaService.postMessage(
+              spaceId,
+              {
+                ...(threadKey ? { thread: { name: threadKey } } : {}),
+                cardsV2: [errCard],
+              },
+              c.env.GOOGLE_SERVICE_ACCOUNT_JSON
+            );
+          }
+        };
+
         if (!existingDraft) {
           try {
             const gemini = new GeminiService(c.env.GEMINI_API_KEY);
@@ -731,8 +863,14 @@ app.post('/', async (c) => {
               c.env.GOOGLE_SERVICE_ACCOUNT_JSON
             );
 
-            // 2. If inquiring about listings/inventory, also post the active inventory summary card
-            if (
+            // 2. If user requested a Google Sheet report, generate and post it
+            const isSheetRequested =
+              chatResult.isSheetExportRequested ||
+              /\b(google\s+sheets?|sheets?|spreadsheets?|excel|csv|export\s+to\s+sheets?|reporting)\b/i.test(messageText);
+
+            if (isSheetRequested) {
+              await handleSheetReportRequest();
+            } else if (
               (isInventoryQuery || chatResult.isInventoryInquiry) &&
               inventorySummary &&
               inventorySummary.totalCount > 0
@@ -905,8 +1043,14 @@ app.post('/', async (c) => {
             );
           }
 
-          // If the user's question was about overall inventory, also post the active inventory summary card
-          if (
+          // If the user requested a Google Sheet report, generate and post it
+          const isSheetRequested =
+            chatResult.isSheetExportRequested ||
+            /\b(google\s+sheets?|sheets?|spreadsheets?|excel|csv|export\s+to\s+sheets?|reporting)\b/i.test(messageText);
+
+          if (isSheetRequested) {
+            await handleSheetReportRequest();
+          } else if (
             (isInventoryQuery || chatResult.isInventoryInquiry) &&
             inventorySummary &&
             inventorySummary.totalCount > 0
