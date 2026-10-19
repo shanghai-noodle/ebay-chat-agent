@@ -5,7 +5,7 @@ import { DraftStore } from './services/draft-store';
 import { GeminiService } from './services/gemini';
 import { EbayEPSService } from './services/ebay/eps';
 import { EbayTaxonomyService } from './services/ebay/taxonomy';
-import { EbayTradingService } from './services/ebay/trading';
+import { EbayTradingService, SellerInventorySummary } from './services/ebay/trading';
 import { GoogleChatCards } from './services/google-chat/cards';
 import { GoogleChatMediaService } from './services/google-chat/media';
 import { AVATAR_BASE64 } from './assets/avatar-data';
@@ -693,10 +693,35 @@ app.post('/', async (c) => {
       (async () => {
         const existingDraft = await draftStore.getDraft(spaceId, threadKey);
 
+        const tradingService = new EbayTradingService({
+          epsUrl: c.env.EBAY_EPS_URL,
+          userToken: c.env.EBAY_USER_TOKEN,
+          appId: c.env.EBAY_APP_ID,
+          devId: c.env.EBAY_DEV_ID,
+          certId: c.env.EBAY_CERT_ID,
+        });
+
+        // Load active inventory (fast <5ms KV lookup or live eBay Trading API query)
+        const isForceRefresh = /\b(refresh|sync|force|reload)\b/i.test(messageText);
+        let inventorySummary: SellerInventorySummary | null = null;
+        try {
+          inventorySummary = await tradingService.getActiveSellerListings(isForceRefresh, c.env);
+        } catch (invErr) {
+          console.warn('[Inventory] Failed to fetch seller inventory:', invErr);
+        }
+
+        const isInventoryQuery =
+          /\b(inventory|listings?|listed|portfolio|active\s+items?|check\s+items?|analyze|audit|how\s+many\s+items|what\s+do\s+i\s+have|catalog)\b/i.test(
+            messageText
+          ) ||
+          /\b(237\d{9}|336\d{9}|334\d{9}|234\d{9})\b/.test(messageText);
+
         if (!existingDraft) {
           try {
             const gemini = new GeminiService(c.env.GEMINI_API_KEY);
-            const chatResult = await gemini.chatWithSeller(messageText, null);
+            const chatResult = await gemini.chatWithSeller(messageText, null, inventorySummary);
+
+            // 1. Post Gemini's conversational reply message
             await GoogleChatMediaService.postMessage(
               spaceId,
               {
@@ -705,6 +730,23 @@ app.post('/', async (c) => {
               },
               c.env.GOOGLE_SERVICE_ACCOUNT_JSON
             );
+
+            // 2. If inquiring about listings/inventory, also post the active inventory summary card
+            if (
+              (isInventoryQuery || chatResult.isInventoryInquiry) &&
+              inventorySummary &&
+              inventorySummary.totalCount > 0
+            ) {
+              const invCard = GoogleChatCards.buildInventorySummaryCard(inventorySummary).cardsV2[0];
+              await GoogleChatMediaService.postMessage(
+                spaceId,
+                {
+                  ...(threadKey ? { thread: { name: threadKey } } : {}),
+                  cardsV2: [invCard],
+                },
+                c.env.GOOGLE_SERVICE_ACCOUNT_JSON
+              );
+            }
           } catch (err: any) {
             console.error('[Chat] General Q&A error:', err);
             await GoogleChatMediaService.postMessage(
@@ -810,7 +852,7 @@ app.post('/', async (c) => {
         // Multi-turn conversational relay to Gemini for Q&A and intelligent draft refinements
         try {
           const gemini = new GeminiService(c.env.GEMINI_API_KEY);
-          const chatResult = await gemini.chatWithSeller(messageText, existingDraft);
+          const chatResult = await gemini.chatWithSeller(messageText, existingDraft, inventorySummary);
 
           if (chatResult.hasDraftUpdates && chatResult.draftUpdates) {
             const updates = chatResult.draftUpdates;
@@ -858,6 +900,23 @@ app.post('/', async (c) => {
               {
                 ...(threadKey ? { thread: { name: threadKey } } : {}),
                 text: chatResult.replyText,
+              },
+              c.env.GOOGLE_SERVICE_ACCOUNT_JSON
+            );
+          }
+
+          // If the user's question was about overall inventory, also post the active inventory summary card
+          if (
+            (isInventoryQuery || chatResult.isInventoryInquiry) &&
+            inventorySummary &&
+            inventorySummary.totalCount > 0
+          ) {
+            const invCard = GoogleChatCards.buildInventorySummaryCard(inventorySummary).cardsV2[0];
+            await GoogleChatMediaService.postMessage(
+              spaceId,
+              {
+                ...(threadKey ? { thread: { name: threadKey } } : {}),
+                cardsV2: [invCard],
               },
               c.env.GOOGLE_SERVICE_ACCOUNT_JSON
             );

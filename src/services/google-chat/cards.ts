@@ -1,4 +1,5 @@
 import { ListingDraft } from '../../types/draft';
+import { SellerInventorySummary } from '../ebay/trading';
 
 export class GoogleChatCards {
   /**
@@ -259,6 +260,93 @@ export class GoogleChatCards {
                   {
                     textParagraph: {
                       text: `<font color="#c5221f">${errorMessage}</font>`,
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    };
+  }
+
+  /**
+   * Card rendered for Active Inventory Overview & Portfolio Analysis.
+   */
+  static buildInventorySummaryCard(inventory: SellerInventorySummary): any {
+    const topItemsText = inventory.topValuable
+      .slice(0, 4)
+      .map(
+        (item, idx) =>
+          `<b>${idx + 1}.</b> <a href="${item.listingUrl}">${item.title.slice(0, 48)}...</a> — <font color="#188038"><b>$${item.price.toFixed(2)}</b></font>`
+      )
+      .join('<br>');
+
+    const categoryBreakdownText = Object.entries(inventory.categoryCounts)
+      .map(([cat, count]) => `• <b>${cat}:</b> ${count} item${count === 1 ? '' : 's'}`)
+      .join('<br>');
+
+    return {
+      cardsV2: [
+        {
+          cardId: `inventory-summary-${Date.now()}`,
+          card: {
+            header: {
+              title: '📊 Active eBay Portfolio Analysis',
+              subtitle: `${inventory.totalCount} Active Listings · Total Value: $${inventory.totalValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`,
+              imageUrl: 'https://pages.ebay.com/favicon.ico',
+              imageType: 'CIRCLE',
+            },
+            sections: [
+              {
+                header: 'Inventory Metrics',
+                widgets: [
+                  {
+                    decoratedText: {
+                      topLabel: 'Portfolio Value',
+                      text: `<font color="#188038"><font size="+2"><b>$${inventory.totalValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</b></font></font>`,
+                      bottomLabel: `Average Price: $${inventory.averagePrice.toFixed(2)} across ${inventory.totalCount} listings`,
+                    },
+                  },
+                  {
+                    decoratedText: {
+                      topLabel: 'Collections Breakdown',
+                      text: categoryBreakdownText,
+                      wrapText: true,
+                    },
+                  },
+                ],
+              },
+              {
+                header: 'Top Value Highlights',
+                widgets: [
+                  {
+                    decoratedText: {
+                      text: topItemsText,
+                      wrapText: true,
+                    },
+                  },
+                  {
+                    buttonList: {
+                      buttons: [
+                        {
+                          text: '🌐 Browse Storefront',
+                          onClick: {
+                            openLink: {
+                              url: 'https://bluestonelab.trade',
+                            },
+                          },
+                        },
+                        {
+                          text: '🏷️ View eBay Store',
+                          onClick: {
+                            openLink: {
+                              url: 'https://www.ebay.com/usr/ly014132',
+                            },
+                          },
+                        },
+                      ],
                     },
                   },
                 ],

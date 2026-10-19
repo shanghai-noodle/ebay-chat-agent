@@ -1,4 +1,5 @@
 import { ListingDraft } from '../types/draft';
+import { SellerInventorySummary } from './ebay/trading';
 
 export interface ExtractedItemAnalysis {
   title: string;
@@ -268,14 +269,16 @@ Update the draft fields based on the user's instruction. If the user mentions a 
    */
   async chatWithSeller(
     userMessage: string,
-    currentDraft?: ListingDraft | null
+    currentDraft?: ListingDraft | null,
+    inventorySummary?: SellerInventorySummary | null
   ): Promise<{
     replyText: string;
     hasDraftUpdates: boolean;
     draftUpdates?: Partial<ListingDraft>;
+    isInventoryInquiry?: boolean;
   }> {
     const draftContext = currentDraft
-      ? `Active Listing Draft:
+      ? `Active Listing Draft in Current Thread:
 - Title: "${currentDraft.title}"
 - Condition: ${currentDraft.condition} (${currentDraft.conditionDescription || 'No flaws'})
 - Price: $${currentDraft.price.toFixed(2)} USD
@@ -285,22 +288,58 @@ Update the draft fields based on the user's instruction. If the user mentions a 
 ${currentDraft.marketIntelligence ? `- Market Comps: Active ${currentDraft.marketIntelligence.activeCompRange || 'N/A'}, Sold ${currentDraft.marketIntelligence.recentSoldRange || 'N/A'} - ${currentDraft.marketIntelligence.competitorSummary || ''}` : ''}`
       : 'No active listing draft in this thread yet.';
 
-    const systemPrompt = `You are an expert eBay Selling Assistant and ecommerce advisor.
-You are conversing with the seller "ly014132", an authentic California seller specializing in collectibles, figures, and merchandise.
+    let inventoryBlock = '';
+    if (inventorySummary && inventorySummary.totalCount > 0) {
+      const topItemsStr = inventorySummary.topValuable
+        .map((i, idx) => `  ${idx + 1}. #${i.itemId}: "${i.title}" — $${i.price.toFixed(2)} [${i.categoryGroup}]`)
+        .join('\n');
+
+      const allItemsList = inventorySummary.items
+        .map(
+          (i) =>
+            `- #${i.itemId}: "${i.title}" | $${i.price.toFixed(2)} | [${i.categoryGroup || 'General'}] | ${i.condition || 'MISB'} | URL: ${i.listingUrl}`
+        )
+        .join('\n');
+
+      inventoryBlock = `
+SELLER'S CURRENT ACTIVE EBAY INVENTORY:
+• Total Active Listings: ${inventorySummary.totalCount} items
+• Total Portfolio Retail Value: $${inventorySummary.totalValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+• Average Listing Price: $${inventorySummary.averagePrice.toFixed(2)} USD
+• Categories Breakdown: ${Object.entries(inventorySummary.categoryCounts).map(([cat, count]) => `${cat} (${count})`).join(', ')}
+• Top 5 Most Valuable Listings:
+${topItemsStr}
+
+FULL ACTIVE LISTINGS CATALOG:
+${allItemsList}
+`;
+    }
+
+    const systemPrompt = `You are an expert eBay Selling Assistant, inventory strategist, and ecommerce advisor.
+You are conversing with the seller "ly014132", an authentic California seller specializing in collectibles, figures, die-cast models, and rare merchandise.
 
 ${draftContext}
+${inventoryBlock}
 
 User Message: "${userMessage}"
 
 Instructions:
-1. Answer the user's question or message directly, conversationally, concisely, and accurately.
-   - If they ask about competitor prices or market comps, give realistic market data and eBay trends.
-   - If they ask general eBay, shipping, packaging, or listing advice, answer helpfully.
-   - Keep responses easy to read in Google Chat (1-3 friendly paragraphs with bullet points if helpful).
-2. If the user's message asks to update/modify the draft (e.g. price change, shipping cost, title change, condition change, or description update):
+1. You have complete, direct access to the seller's active eBay inventory provided above.
+2. If the user asks to check, review, list, analyze, audit, or summarize their listed items:
+   - Provide a high-value, professional inventory analysis using the real data:
+     * Overview: Total listings (${inventorySummary?.totalCount || 0} items) and total portfolio value ($${inventorySummary?.totalValue.toFixed(2) || '0.00'} USD).
+     * Category Distribution: Break down their collections (e.g. Transformers, Die-Cast & Vehicles, Disney Pixar, LEGO & Sets).
+     * Key Highlights: Point out their most valuable pieces (e.g. Takara Prime AM-24 Silas Breakdown, MP-10 Optimus Prime, Disney Cars Lightning McQueen, etc.).
+     * Specific Item Lookups: If they ask about a specific item (by character, title, or Item ID like 237131227545), give detailed stats and advice on that specific listing.
+     * Filtering: If they ask for items matching a filter (e.g. "items under $50", "list my Transformers", "what Disney items do I have?"), filter and list those exact items with their prices and links.
+     * Actionable Advice: Note pricing health, sealed condition status (MISB/NIB), and tips to maximize sell-through.
+   - Set "isInventoryInquiry": true.
+3. If they ask about competitor prices or market comps, give realistic market data and eBay trends.
+4. If the user's message asks to update/modify the draft (e.g. price change, shipping cost, title change, condition change, or description update):
    - Set "hasDraftUpdates": true
    - In "draftUpdates", provide only the updated fields (e.g. { "price": 45, "shippingCost": 0 }).
-   - Otherwise, set "hasDraftUpdates": false.`;
+   - Otherwise, set "hasDraftUpdates": false.
+5. Format your response cleanly for Google Chat with bold headers, bullet points, and neat spacing.`;
 
     try {
       const outputText = await this.callInteractionsApi({
@@ -314,6 +353,10 @@ Instructions:
               replyText: {
                 type: 'string',
                 description: 'The conversational response to display to the user in Google Chat.',
+              },
+              isInventoryInquiry: {
+                type: 'boolean',
+                description: 'True if the user asked about, inquired about, or requested analysis on their eBay inventory or listed items.',
               },
               hasDraftUpdates: {
                 type: 'boolean',
@@ -352,6 +395,7 @@ Instructions:
       return {
         replyText: `I received your message: "${userMessage}". Let me know if you would like to adjust the price, title, or publish!`,
         hasDraftUpdates: false,
+        isInventoryInquiry: false,
       };
     }
   }
