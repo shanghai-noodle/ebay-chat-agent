@@ -99,7 +99,7 @@ export interface SheetCustomizationIntent {
 export class GeminiService {
   private apiKey: string;
   private listingModels = ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.5-flash'];
-  private queryModels = ['gemini-4-argon', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-flash-latest'];
+  private queryModels = ['gemini-4-argon', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.5-flash', 'gemini-flash-latest'];
 
   constructor(apiKey: string) {
     this.apiKey = apiKey;
@@ -114,6 +114,7 @@ export class GeminiService {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ...payload, model }),
+          signal: AbortSignal.timeout(8000),
         });
 
         if (!res.ok) {
@@ -462,8 +463,13 @@ Instructions:
       return JSON.parse(outputText);
     } catch (err: any) {
       console.warn('[Gemini] chatWithSeller error, falling back to basic reply:', err);
+      const isQuotaError = /rate limit|quota|429|limit:\s*20\s*requests/i.test(err?.message || '');
+      const replyText = isQuotaError
+        ? `⚠️ **Gemini AI Daily Quota Exceeded**\n\nThe Gemini API key has reached its Google AI Studio Free Tier limit (20 requests/day for Flash models or 0 quota for Gemini 4 Argon).\n\n💡 **How to resolve:**\n• Switch your Gemini project to **Pay-As-You-Go** at https://ai.dev/rate-limit for high rate limits (2,000 RPM).\n• Or wait for the daily quota to reset (resets at midnight Pacific Time).`
+        : `I received your message: "${userMessage}". Let me know if you would like to adjust the price, title, or publish!`;
+
       return {
-        replyText: `I received your message: "${userMessage}". Let me know if you would like to adjust the price, title, or publish!`,
+        replyText,
         hasDraftUpdates: false,
         isInventoryInquiry: false,
         isSheetExportRequested: false,

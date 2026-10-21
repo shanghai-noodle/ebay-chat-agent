@@ -1137,11 +1137,15 @@ app.post('/', async (c) => {
             }
           } catch (err: any) {
             console.error('[Chat] General Q&A error:', err);
+            const isQuota = /rate limit|quota|429/i.test(err?.message || '');
+            const fallbackMsg = isQuota
+              ? '⚠️ Gemini AI quota limit was reached for today (Google AI Studio Free Tier limit: 20 requests/day). Please upgrade your API key tier at https://ai.dev/rate-limit or wait for the quota to reset.'
+              : '📸 Please upload a photo of the item you want to sell first, and I will generate your listing draft!';
             await GoogleChatMediaService.postMessage(
               spaceId,
               {
                 ...(threadKey ? { thread: { name: threadKey } } : {}),
-                text: '📸 Please upload a photo of the item you want to sell first, and I will generate your listing draft!',
+                text: fallbackMsg,
               },
               c.env.GOOGLE_SERVICE_ACCOUNT_JSON
             );
