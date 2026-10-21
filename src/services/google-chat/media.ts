@@ -162,8 +162,11 @@ export class GoogleChatMediaService {
       try {
         const sa = JSON.parse(serviceAccountJson) as ServiceAccountCredentials;
         const accessToken = await this.getServiceAccountAccessToken(sa);
-        const resourceName = encodeURIComponent(attachment.attachmentDataRef.resourceName);
-        const mediaUrl = `https://chat.googleapis.com/v1/media/${resourceName}?alt=media`;
+        // Do NOT use encodeURIComponent on the entire resourceName because slashes ('/') in
+        // spaces/.../messages/.../attachments/... must NOT be URL-encoded in the /v1/media/{+resourceName} path!
+        const rawResourceName = attachment.attachmentDataRef.resourceName;
+        const cleanResourceName = rawResourceName.split('/').map(encodeURIComponent).join('/');
+        const mediaUrl = `https://chat.googleapis.com/v1/media/${cleanResourceName}?alt=media`;
 
         const res = await fetch(mediaUrl, {
           headers: { Authorization: `Bearer ${accessToken}` },
@@ -198,7 +201,8 @@ export class GoogleChatMediaService {
           const metaData = (await metaRes.json()) as any;
           const resourceName = metaData.attachmentDataRef?.resourceName;
           if (resourceName) {
-            const mediaUrl = `https://chat.googleapis.com/v1/media/${encodeURIComponent(resourceName)}?alt=media`;
+            const cleanResourceName = resourceName.split('/').map(encodeURIComponent).join('/');
+            const mediaUrl = `https://chat.googleapis.com/v1/media/${cleanResourceName}?alt=media`;
             const mediaRes = await fetch(mediaUrl, {
               headers: { Authorization: `Bearer ${accessToken}` },
             });
@@ -264,8 +268,12 @@ export class GoogleChatMediaService {
     try {
       const sa = JSON.parse(serviceAccountJson) as ServiceAccountCredentials;
       const accessToken = await this.getServiceAccountAccessToken(sa);
-      const url = `https://chat.googleapis.com/v1/${spaceName}/messages?messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD`;
-      const res = await fetch(url, {
+      const hasThread = Boolean(messagePayload.thread?.name);
+      const url = hasThread
+        ? `https://chat.googleapis.com/v1/${spaceName}/messages?messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD`
+        : `https://chat.googleapis.com/v1/${spaceName}/messages`;
+
+      let res = await fetch(url, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -273,6 +281,22 @@ export class GoogleChatMediaService {
         },
         body: JSON.stringify(messagePayload),
       });
+
+      // If posting with thread failed (e.g. 400 bad thread name or option), retry posting to space without thread
+      if (!res.ok && hasThread) {
+        console.warn(`[GoogleChatMedia] postMessage with thread failed (${res.status}), retrying without thread directly in space...`);
+        const fallbackPayload = { ...messagePayload };
+        delete fallbackPayload.thread;
+        res = await fetch(`https://chat.googleapis.com/v1/${spaceName}/messages`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(fallbackPayload),
+        });
+      }
+
       if (!res.ok) {
         const err = await res.text();
         console.error(`[GoogleChatMedia] postMessage error (${res.status}):`, err);

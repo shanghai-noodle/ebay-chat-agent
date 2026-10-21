@@ -105,7 +105,11 @@ export class GeminiService {
     this.apiKey = apiKey;
   }
 
-  private async callInteractionsApi(payload: any, models: string[] = this.listingModels): Promise<string> {
+  private async callInteractionsApi(
+    payload: any,
+    models: string[] = this.listingModels,
+    timeoutMs: number = 30000
+  ): Promise<string> {
     let lastError: Error | undefined;
 
     for (const model of models) {
@@ -114,7 +118,7 @@ export class GeminiService {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ...payload, model }),
-          signal: AbortSignal.timeout(8000),
+          signal: AbortSignal.timeout(timeoutMs),
         });
 
         if (!res.ok) {
@@ -200,17 +204,21 @@ export class GeminiService {
       mime_type: img.mimeType || 'image/jpeg',
     }));
 
-    const outputText = await this.callInteractionsApi({
-      input: [
-        { type: 'text', text: prompt },
-        ...imageInputs,
-      ],
-      response_format: {
-        type: 'text',
-        mime_type: 'application/json',
-        schema: EXTRACTION_SCHEMA,
+    const outputText = await this.callInteractionsApi(
+      {
+        input: [
+          { type: 'text', text: prompt },
+          ...imageInputs,
+        ],
+        response_format: {
+          type: 'text',
+          mime_type: 'application/json',
+          schema: EXTRACTION_SCHEMA,
+        },
       },
-    });
+      this.listingModels,
+      45000
+    );
 
     return JSON.parse(outputText) as ExtractedItemAnalysis;
   }

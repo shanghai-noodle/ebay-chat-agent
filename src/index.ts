@@ -743,7 +743,18 @@ app.post('/', async (c) => {
                 .map((r) => r.value);
 
               if (addedUrls.length === 0) {
-                throw new Error('Failed to upload new photo(s) to eBay Picture Services.');
+                const firstRejected = epsResults.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
+                const reasonMsg = firstRejected?.reason?.message || 'Unknown EPS error';
+                console.warn(`[Upload] Failed to upload photos to existing draft: ${reasonMsg}`);
+                await GoogleChatMediaService.postMessage(
+                  spaceId,
+                  {
+                    ...(threadKey ? { thread: { name: threadKey } } : {}),
+                    text: `⚠️ Could not upload photo to eBay EPS: ${reasonMsg}. Please refresh your EBAY_USER_TOKEN.`,
+                  },
+                  c.env.GOOGLE_SERVICE_ACCOUNT_JSON
+                );
+                return;
               }
 
               const combinedUrls = Array.from(new Set([...existingDraft.imageUrls, ...addedUrls])).slice(0, 16);
@@ -799,12 +810,15 @@ app.post('/', async (c) => {
               .filter((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled')
               .map((r) => r.value);
 
+            let epsWarning: string | null = null;
             if (newEpsUrls.length === 0) {
               const firstRejected = epsResults.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
-              throw new Error(`Failed to upload photos to eBay EPS: ${firstRejected?.reason?.message || 'Unknown EPS error'}`);
+              const reasonMsg = firstRejected?.reason?.message || 'Unknown EPS error';
+              console.warn(`[Processing] Photo upload to eBay EPS failed: ${reasonMsg}. Proceeding with draft generation.`);
+              epsWarning = `⚠️ **Notice:** eBay photo upload failed (${reasonMsg}). Your listing draft was created below with title, category, price, and description! Please refresh your EBAY_USER_TOKEN before publishing.`;
+            } else {
+              console.log(`[Processing] Uploaded ${newEpsUrls.length}/${validImages.length} images to eBay EPS.`);
             }
-
-            console.log(`[Processing] Uploaded ${newEpsUrls.length}/${validImages.length} images to eBay EPS.`);
 
             // Resolve eBay leaf category
             const categoryMatch = await taxonomy.getCategorySuggestion(
@@ -854,6 +868,7 @@ app.post('/', async (c) => {
               spaceId,
               {
                 ...(threadKey ? { thread: { name: threadKey } } : {}),
+                ...(epsWarning ? { text: epsWarning } : {}),
                 cardsV2: [previewCard],
               },
               c.env.GOOGLE_SERVICE_ACCOUNT_JSON
