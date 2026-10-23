@@ -5,6 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 account_id = "8623b33254a8cb7d008248402e8e3f50"
 
 [vars]
+AI_PROVIDER = "groq"
 EBAY_ENV = "production"
 EBAY_API_BASE = "https://api.ebay.com"
 EBAY_EPS_URL = "https://api.ebay.com/ws/api.dll"

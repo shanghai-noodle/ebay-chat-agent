@@ -2,7 +2,8 @@ import { Hono } from 'hono';
 import { CloudflareBindings } from './env';
 import { ListingDraft } from './types/draft';
 import { DraftStore } from './services/draft-store';
-import { GeminiService, SheetCustomizationIntent } from './services/gemini';
+import { getAIService } from './services/ai/factory';
+import { SheetCustomizationIntent } from './services/ai/types';
 import { EbayEPSService } from './services/ebay/eps';
 import { EbayTaxonomyService } from './services/ebay/taxonomy';
 import { EbayTradingService, SellerInventorySummary } from './services/ebay/trading';
@@ -82,8 +83,8 @@ function parseSheetCustomization(
     }
   }
 
-  // 4. Gemini Suggested Price / Suggested Price Adjustment
-  if (/\b(?:add|include)\s+(?:a\s+)?(?:gemini\s+)?suggested\s+price(?:\s+adjustment)?\b/i.test(messageText)) {
+  // 4. AI / Gemini / Groq Suggested Price / Suggested Price Adjustment
+  if (/\b(?:add|include)\s+(?:a\s+)?(?:gemini\s+|groq\s+|ai\s+)?suggested\s+price(?:\s+adjustment)?\b/i.test(messageText)) {
     layout.columnsToAdd = layout.columnsToAdd || [];
     if (/\badjustment\b/i.test(messageText)) {
       if (!layout.columnsToAdd.some((a) => (a.column || '').toLowerCase().includes('adjust'))) {
@@ -775,15 +776,15 @@ app.post('/', async (c) => {
               return;
             }
 
-            // Brand new draft creation: run Gemini vision & EPS uploads in batches
-            const gemini = new GeminiService(c.env.GEMINI_API_KEY);
+            // Brand new draft creation: run AI vision & EPS uploads in batches
+            const ai = getAIService(c.env);
             const taxonomy = new EbayTaxonomyService({
               apiBase: c.env.EBAY_API_BASE,
               appId: c.env.EBAY_APP_ID,
               certId: c.env.EBAY_CERT_ID,
             });
 
-            console.log(`[Processing] Analyzing ${validImages.length} photo(s) with Gemini Vision & uploading to eBay EPS in batches...`);
+            console.log(`[Processing] Analyzing ${validImages.length} photo(s) with ${ai.providerName} Vision & uploading to eBay EPS in batches...`);
 
             // Upload to EPS in batches of 3 to avoid overwhelming connection and memory limits
             const uploadBatchSize = 3;
@@ -802,7 +803,7 @@ app.post('/', async (c) => {
             };
 
             const [analysis, epsResults] = await Promise.all([
-              gemini.analyzeItemImages(validImages, messageText),
+              ai.analyzeItemImages(validImages, messageText),
               uploadEpsInBatches(),
             ]);
 
@@ -1110,10 +1111,10 @@ app.post('/', async (c) => {
 
         if (!existingDraft) {
           try {
-            const gemini = new GeminiService(c.env.GEMINI_API_KEY);
-            const chatResult = await gemini.chatWithSeller(messageText, null, inventorySummary);
+            const ai = getAIService(c.env);
+            const chatResult = await ai.chatWithSeller(messageText, null, inventorySummary);
 
-            // 1. Post Gemini's conversational reply message
+            // 1. Post conversational reply message
             await GoogleChatMediaService.postMessage(
               spaceId,
               {
@@ -1154,8 +1155,8 @@ app.post('/', async (c) => {
             console.error('[Chat] General Q&A error:', err);
             const isQuota = /rate limit|quota|429/i.test(err?.message || '');
             const fallbackMsg = isQuota
-              ? '⚠️ Gemini AI quota limit was reached for today (Google AI Studio Free Tier limit: 20 requests/day). Please upgrade your API key tier at https://ai.dev/rate-limit or wait for the quota to reset.'
-              : '📸 Please upload a photo of the item you want to sell first, and I will generate your listing draft!';
+              ? `⚠️ **${c.env.AI_PROVIDER === 'gemini' ? 'Gemini' : 'Groq'} AI Free Tier Limit Reached**\n\nThe AI rate limit was reached. Please wait a moment before trying again.\n\n*Error: ${err?.message}*`
+              : `⚠️ **AI Service Error**: ${err?.message || 'Error processing request.'}`;
             await GoogleChatMediaService.postMessage(
               spaceId,
               {
@@ -1256,10 +1257,10 @@ app.post('/', async (c) => {
           }
         }
 
-        // Multi-turn conversational relay to Gemini for Q&A and intelligent draft refinements
+        // Multi-turn conversational relay to AI service for Q&A and intelligent draft refinements
         try {
-          const gemini = new GeminiService(c.env.GEMINI_API_KEY);
-          const chatResult = await gemini.chatWithSeller(messageText, existingDraft, inventorySummary);
+          const ai = getAIService(c.env);
+          const chatResult = await ai.chatWithSeller(messageText, existingDraft, inventorySummary);
 
           if (chatResult.hasDraftUpdates && chatResult.draftUpdates) {
             const updates = chatResult.draftUpdates;
@@ -1370,13 +1371,13 @@ app.post('/', async (c) => {
               }
             }
           }
-        } catch (geminiErr: any) {
-          console.error('[Chat] Conversational error:', geminiErr);
+        } catch (aiErr: any) {
+          console.error('[Chat] Conversational error:', aiErr);
           await GoogleChatMediaService.postMessage(
             spaceId,
             {
               ...(threadKey ? { thread: { name: threadKey } } : {}),
-              text: `⚠️ I encountered an issue processing your request: ${geminiErr.message || geminiErr}. Please try again!`,
+              text: `⚠️ **AI Service Error**: ${aiErr.message || aiErr}`,
             },
             c.env.GOOGLE_SERVICE_ACCOUNT_JSON
           );

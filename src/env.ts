@@ -8,8 +8,14 @@ export interface CloudflareBindings {
   EBAY_EPS_URL: string;
   EBAY_MARKETPLACE_ID: string;
 
+  // AI Configuration: 'groq' (default) or 'gemini'
+  AI_PROVIDER?: 'groq' | 'gemini';
+  GROQ_VISION_MODEL?: string;
+  GROQ_CHAT_MODEL?: string;
+
   // Secrets (configured via wrangler secret put)
-  GEMINI_API_KEY: string;
+  GROQ_API_KEY?: string;
+  GEMINI_API_KEY?: string;
   EBAY_APP_ID: string;
   EBAY_CERT_ID: string;
   EBAY_DEV_ID: string;

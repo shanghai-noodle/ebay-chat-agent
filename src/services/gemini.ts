@@ -1,25 +1,18 @@
 import { ListingDraft } from '../types/draft';
 import { SellerInventorySummary } from './ebay/trading';
+import {
+  AIService,
+  ExtractedItemAnalysis,
+  SellerChatResponse,
+  SheetCustomizationIntent,
+} from './ai/types';
 
-export interface ExtractedItemAnalysis {
-  title: string;
-  categoryKeywords: string;
-  condition: 'NEW' | 'LIKE_NEW' | 'USED_EXCELLENT' | 'USED_GOOD' | 'FOR_PARTS_OR_NOT_WORKING';
-  conditionDescription: string;
-  aspects: Record<string, string[]>;
-  descriptionHtml: string;
-  suggestedPrice: {
-    low: number;
-    recommended: number;
-    high: number;
-  };
-  marketIntelligence?: {
-    activeCompRange?: string;
-    recentSoldRange?: string;
-    competitorSummary?: string;
-  };
-  shippingCost?: number;
-}
+export type {
+  AIService,
+  ExtractedItemAnalysis,
+  SellerChatResponse,
+  SheetCustomizationIntent,
+};
 
 const EXTRACTION_SCHEMA = {
   type: 'object',
@@ -88,15 +81,8 @@ const EXTRACTION_SCHEMA = {
   required: ['title', 'categoryKeywords', 'condition', 'conditionDescription', 'aspects', 'descriptionHtml', 'suggestedPrice', 'marketIntelligence'],
 };
 
-export interface SheetCustomizationIntent {
-  moveColumns?: Array<{ column: string; toPosition: string | number }>;
-  columnsToAdd?: Array<{ column?: string; id?: string; title?: string; position?: string | number }>;
-  columnsToRemove?: string[];
-  colorCodeColumns?: string[];
-  rowHeight?: number;
-}
-
-export class GeminiService {
+export class GeminiService implements AIService {
+  readonly providerName = 'gemini';
   private apiKey: string;
   private listingModels = ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.5-flash'];
   private queryModels = ['gemini-4-argon', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.5-flash', 'gemini-flash-latest'];
